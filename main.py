@@ -4,35 +4,84 @@ from PIL import Image
 from PyQt6.QtWidgets import (QApplication, QMainWindow, QWidget, QVBoxLayout, 
                             QHBoxLayout, QMenuBar, QMenu, QLabel, QPushButton,
                             QFileDialog, QScrollArea, QSplitter)
-from PyQt6.QtCore import Qt, QPoint, pyqtSignal  # pyqtSignalを追加
-from PyQt6.QtGui import QPixmap, QImage
+from PyQt6.QtCore import Qt, QPoint, pyqtSignal, QEvent, QSize  # QSizeをQtCoreからインポート
+from PyQt6.QtGui import QPixmap, QImage, QWheelEvent
+from PyQt6.QtWidgets import QGesture, QPinchGesture
 
 class CustomScrollArea(QScrollArea):
+    scale_changed = pyqtSignal(float)
+
     def __init__(self):
         super().__init__()
         self.setMouseTracking(True)
         self.last_pos = None
         self.mouse_pressed = False
+        
+        # タッチスクリーンとジェスチャーのサポートを有効化
+        self.viewport().setAttribute(Qt.WidgetAttribute.WA_AcceptTouchEvents)
+        self.grabGesture(Qt.GestureType.PinchGesture)
+        self.viewport().installEventFilter(self)
 
     def mousePressEvent(self, event):
         if event.button() == Qt.MouseButton.LeftButton:
             self.mouse_pressed = True
             self.last_pos = event.pos()
             self.setCursor(Qt.CursorShape.ClosedHandCursor)
+            event.accept()  # イベントを受け付けたことを明示
+        else:
+            super().mousePressEvent(event)
 
     def mouseReleaseEvent(self, event):
         if event.button() == Qt.MouseButton.LeftButton:
             self.mouse_pressed = False
             self.setCursor(Qt.CursorShape.ArrowCursor)
+            event.accept()  # イベントを受け付けたことを明示
+        else:
+            super().mouseReleaseEvent(event)
 
     def mouseMoveEvent(self, event):
-        if self.mouse_pressed:
+        if self.mouse_pressed and self.last_pos is not None:
             delta = event.pos() - self.last_pos
             self.horizontalScrollBar().setValue(
                 self.horizontalScrollBar().value() - delta.x())
             self.verticalScrollBar().setValue(
                 self.verticalScrollBar().value() - delta.y())
             self.last_pos = event.pos()
+            event.accept()  # イベントを受け付けたことを明示
+        else:
+            super().mouseMoveEvent(event)
+    
+    def eventFilter(self, obj, event):
+        if obj is self.viewport():
+            if event.type() == QEvent.Type.Gesture:
+                gesture = event.gesture(Qt.GestureType.PinchGesture)
+                if gesture:
+                    scale_factor = gesture.scaleFactor()
+                    
+                    # 過剰な呼び出しを防ぐ
+                    if abs(scale_factor - 1.0) > 0.01:
+                        self.scale_changed.emit(scale_factor)
+                    return True
+        return super().eventFilter(obj, event)
+
+    def wheelEvent(self, event: QWheelEvent):
+        if event.modifiers() & Qt.KeyboardModifier.ControlModifier:
+            delta = event.angleDelta().y()
+            factor = 1.1 if delta > 0 else 0.9
+            self.scale_changed.emit(factor)
+            event.accept()
+        else:
+            super().wheelEvent(event)
+
+    def event(self, event):
+        if event.type() == QEvent.Type.Gesture:
+            gesture = event.gesture(Qt.GestureType.PinchGesture)
+            if isinstance(gesture, QPinchGesture):
+                current_scale = gesture.totalScaleFactor()
+                if current_scale != 1.0:  # ジェスチャーの状態チェックを単純化
+                    self.scale_changed.emit(current_scale)
+                return True
+        return super().event(event)
 
 class ImageViewer(QWidget):
     def __init__(self):
@@ -52,10 +101,19 @@ class ImageViewer(QWidget):
         self.scroll_area.setMinimumSize(600, 500)
         self.scroll_area.setStyleSheet("QScrollArea { border: 2px solid #ccc; background-color: white; }")
         
+        # スクロールエリアのスケール変更シグナルを接続
+        self.scroll_area.scale_changed.connect(self.handle_scale_change)
+        
         # レイアウト
         layout = QVBoxLayout()
         layout.addWidget(self.scroll_area)
         self.setLayout(layout)
+
+        # タッチイベントを有効化
+        self.setAttribute(Qt.WidgetAttribute.WA_AcceptTouchEvents)
+        
+        # ジェスチャーを有効化
+        self.grabGesture(Qt.GestureType.PinchGesture)
 
     def load_image(self, img_array, width, height):
         bytes_per_line = width
@@ -76,16 +134,36 @@ class ImageViewer(QWidget):
         self.scale_factor = 1.0
         self.update_display()
 
+    def handle_scale_change(self, factor):
+        # スケール係数の範囲を制限（例: 0.1 から 10.0）
+        new_scale = self.scale_factor * factor
+        if 0.1 <= new_scale <= 10.0:
+            self.scale_factor = new_scale
+            self.update_display()
+
     def update_display(self):
         if self.current_pixmap:
+            current_pixmap = self.pgm_display.pixmap()
+            new_width = int(self.current_pixmap.width() * self.scale_factor)
+            new_height = int(self.current_pixmap.height() * self.scale_factor)
+            new_size = QSize(new_width, new_height)
+            
+            # 同じスケールサイズなら再描画しない
+            if current_pixmap and current_pixmap.size() == new_size:
+                return
+
             scaled_pixmap = self.current_pixmap.scaled(
-                int(self.current_pixmap.width() * self.scale_factor),
-                int(self.current_pixmap.height() * self.scale_factor),
+                new_size,
                 Qt.AspectRatioMode.KeepAspectRatio,
                 Qt.TransformationMode.SmoothTransformation
             )
             self.pgm_display.setPixmap(scaled_pixmap)
             self.pgm_display.adjustSize()
+
+    def event(self, event):
+        if event.type() == QEvent.Type.Gesture:
+            return self.scroll_area.eventFilter(self.scroll_area.viewport(), event)
+        return super().event(event)
 
 class MenuPanel(QWidget):
     # シグナルの定義
@@ -250,7 +328,7 @@ class MainWindow(QMainWindow):
         try:
             with open(file_path, 'rb') as f:
                 magic = f.readline().decode('ascii').strip()
-                if magic != 'P5':
+                if (magic != 'P5'):
                     raise ValueError('Not a P5 PGM file')
 
                 while True:
