@@ -2,13 +2,22 @@ import sys
 import numpy as np
 from PyQt6.QtWidgets import (QApplication, QMainWindow, QWidget, QVBoxLayout, 
                             QHBoxLayout, QMenuBar, QMenu, QLabel, QPushButton,
-                            QFileDialog, QScrollArea, QSplitter, QGesture, QPinchGesture)
+                            QFileDialog, QScrollArea, QSplitter, QGesture, 
+                            QPinchGesture, QSlider)
 from PyQt6.QtCore import Qt, QPoint, pyqtSignal, QEvent, QSize
 from PyQt6.QtGui import QPixmap, QImage, QWheelEvent
 
+# ピンチジェスチャーの感度調整用定数
 SCALE_SENSITIVITY = 0.2
 
+# スケール関連の定数を追加
+MIN_SCALE = 0.02  # 1/50 (スライダー値1に対応)
+MAX_SCALE = 2.0   # 100/50 (スライダー値100に対応)
+DEFAULT_SCALE = 1.0  # 50/50 (スライダー値50に対応)
+
 class CustomScrollArea(QScrollArea):
+    """カスタムスクロールエリアクラス
+    画像の表示領域とスクロール・ズーム機能を提供"""
     scale_changed = pyqtSignal(float)
 
     def __init__(self):
@@ -17,11 +26,14 @@ class CustomScrollArea(QScrollArea):
         self.last_pos = None
         self.mouse_pressed = False
         
-        # タッチ・ジェスチャー設定
-        self.viewport().setAttribute(Qt.WidgetAttribute.WA_AcceptTouchEvents)
+        # ジェスチャー設定を1箇所に集約
+        for attr in [self, self.viewport()]:
+            attr.setAttribute(Qt.WidgetAttribute.WA_AcceptTouchEvents)
         self.grabGesture(Qt.GestureType.PinchGesture)
 
     def mousePressEvent(self, event):
+        """マウス押下時のイベント処理
+        左クリックでドラッグ開始"""
         if event.button() == Qt.MouseButton.LeftButton:
             self.mouse_pressed = True
             self.last_pos = event.pos()
@@ -39,6 +51,8 @@ class CustomScrollArea(QScrollArea):
             super().mouseReleaseEvent(event)
 
     def mouseMoveEvent(self, event):
+        """マウス移動時のイベント処理
+        ドラッグによるスクロール処理を実装"""
         if self.mouse_pressed and self.last_pos:
             delta = event.pos() - self.last_pos
             self.horizontalScrollBar().setValue(
@@ -52,47 +66,60 @@ class CustomScrollArea(QScrollArea):
 
     def wheelEvent(self, event: QWheelEvent):
         if event.modifiers() & Qt.KeyboardModifier.ControlModifier:
-            self.scale_changed.emit(1.1 if event.angleDelta().y() > 0 else 0.9)
+            # 現在のスケールを考慮して調整
+            factor = 1.04 if event.angleDelta().y() > 0 else 0.96
+            self.scale_changed.emit(factor)
             event.accept()
         else:
             super().wheelEvent(event)
 
     def event(self, event):
+        # ジェスチャー処理を簡略化
         if event.type() == QEvent.Type.Gesture:
             if gesture := event.gesture(Qt.GestureType.PinchGesture):
-                if isinstance(gesture, QPinchGesture):
-                    scale = 1.0 + ((gesture.totalScaleFactor() - 1.0) * SCALE_SENSITIVITY)
-                    if abs(scale - 1.0) > 0.01:
-                        self.scale_changed.emit(scale)
-                    return True
+                # ピンチジェスチャーのスケール係数をスライダーの単位に合わせて調整
+                total_scale = gesture.totalScaleFactor()
+                if abs(total_scale - 1.0) > 0.01:
+                    # より滑らかなスケーリングのために調整
+                    scale = 1.0 + ((total_scale - 1.0) * 0.05)
+                    self.scale_changed.emit(scale)
+                return True
         return super().event(event)
 
 class ImageViewer(QWidget):
+    """画像表示用ウィジェット
+    PGM画像の表示とズーム機能を管理"""
+    # スケール変更通知用のシグナルを追加
+    scale_changed = pyqtSignal(float)
+    
     def __init__(self):
         super().__init__()
-        self.scale_factor = 1.0
-        self.current_pixmap = None
+        self.scale_factor = 1.0  # 画像の拡大率
+        self.current_pixmap = None  # 現在表示中の画像
         
+        self.setup_display()
+        self.setup_scroll_area()
+
+    def setup_display(self):
+        """画像表示用ラベルの設定を集約"""
         self.pgm_display = QLabel()
         self.pgm_display.setAlignment(Qt.AlignmentFlag.AlignCenter)
         self.pgm_display.setStyleSheet("background-color: white;")
-        
+
+    def setup_scroll_area(self):
+        """スクロールエリアの設定を集約"""
         self.scroll_area = CustomScrollArea()
         self.scroll_area.setWidget(self.pgm_display)
         self.scroll_area.setWidgetResizable(True)
         self.scroll_area.setMinimumSize(600, 500)
         self.scroll_area.setStyleSheet("QScrollArea { border: 2px solid #ccc; background-color: white; }")
         self.scroll_area.scale_changed.connect(self.handle_scale_change)
-        
-        layout = QVBoxLayout()
-        layout.addWidget(self.scroll_area)
-        self.setLayout(layout)
 
-        # タッチ・ジェスチャー設定
-        self.setAttribute(Qt.WidgetAttribute.WA_AcceptTouchEvents)
-        self.grabGesture(Qt.GestureType.PinchGesture)
+        self.setLayout(QVBoxLayout())
+        self.layout().addWidget(self.scroll_area)
 
     def load_image(self, img_array, width, height):
+        """PGM画像データを読み込んで表示"""
         bytes_per_line = width
         q_img = QImage(img_array.data, width, height, bytes_per_line,
                     QImage.Format.Format_Grayscale8)
@@ -112,13 +139,19 @@ class ImageViewer(QWidget):
         self.update_display()
 
     def handle_scale_change(self, factor):
+        """ジェスチャーやホイールによるスケール変更を処理"""
         # スケール係数の範囲を制限（例: 0.1 から 10.0）
         new_scale = self.scale_factor * factor
-        if 0.1 <= new_scale <= 10.0:
+        # スケールの範囲をスライダーと同じに制限
+        if MIN_SCALE <= new_scale <= MAX_SCALE:
             self.scale_factor = new_scale
             self.update_display()
+            # スケール変更を通知
+            self.scale_changed.emit(self.scale_factor)
 
     def update_display(self):
+        """画像の表示を更新
+        スケールファクターに応じて画像サイズを変更"""
         if self.current_pixmap:
             new_size = QSize(
                 int(self.current_pixmap.width() * self.scale_factor),
@@ -136,20 +169,22 @@ class ImageViewer(QWidget):
             self.pgm_display.adjustSize() # 必要な場合に画像サイズを調整
 
 class MenuPanel(QWidget):
+    """メニューパネル
+    ファイル操作とズーム制御のUIを提供"""
+    
     # シグナルの定義
-    file_selected = pyqtSignal(str)
-    zoom_in_clicked = pyqtSignal()    # 追加
-    zoom_out_clicked = pyqtSignal()   # 追加
-    zoom_reset_clicked = pyqtSignal() # 追加
+    file_selected = pyqtSignal(str)  # ファイル選択時のシグナル
+    zoom_value_changed = pyqtSignal(int)  # ズーム値変更時のシグナル
     
     def __init__(self, parent=None):
         super().__init__(parent)
         self.setup_ui()
 
     def setup_ui(self):
+        """UIコンポーネントの初期化と配置"""
         layout = QVBoxLayout()
         self.setStyleSheet("background-color: #e8e8e8;")
-        self.setFixedHeight(200)
+        self.setFixedHeight(120)
 
         # メニューバー
         menu_bar = QMenuBar()
@@ -169,31 +204,46 @@ class MenuPanel(QWidget):
         self.select_button = QPushButton("Select PGM File")
         self.select_button.clicked.connect(self.open_file_dialog)
         
-        # ズームコントロール
+        # ズームコントロールをメソッドに分離
+        zoom_widget = self.create_zoom_controls()
+        
+        layout.addWidget(menu_bar)
+        layout.addWidget(self.select_button) # 1. ファイル選択ボタン
+        layout.addWidget(zoom_widget) # 2. ズームコントロール
+        self.setLayout(layout)
+
+    def create_zoom_controls(self):
+        """ズームコントロールの作成を集約"""
         zoom_widget = QWidget()
         zoom_layout = QHBoxLayout()
         
-        # ズームボタンの作成と接続
-        self.zoom_in_button = QPushButton("+")
-        self.zoom_out_button = QPushButton("-")
-        self.zoom_reset_button = QPushButton("Reset")
+        # ズームスライダーの設定
+        self.zoom_slider = QSlider(Qt.Orientation.Horizontal)
+        self.zoom_slider.setRange(1, 100)
+        self.zoom_slider.setValue(50)
         
-        self.zoom_in_button.clicked.connect(self.zoom_in_clicked.emit)
-        self.zoom_out_button.clicked.connect(self.zoom_out_clicked.emit)
-        self.zoom_reset_button.clicked.connect(self.zoom_reset_clicked.emit)
+        # ズーム率表示用ラベル
+        self.zoom_label = QLabel("100%")
+        self.zoom_label.setMinimumWidth(50)  # ラベルの最小幅を設定
+        self.zoom_label.setAlignment(Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignVCenter)
         
-        zoom_layout.addWidget(self.zoom_in_button)
-        zoom_layout.addWidget(self.zoom_out_button)
-        zoom_layout.addWidget(self.zoom_reset_button)
+        # スライダー値変更時の処理を更新
+        def update_zoom(value):
+            zoom_percent = int((value / 50.0) * 100)
+            self.zoom_label.setText(f"{zoom_percent}%")
+            self.zoom_value_changed.emit(value)
+        
+        self.zoom_slider.valueChanged.connect(update_zoom)
+        
+        reset_button = QPushButton("Reset Zoom")
+        reset_button.clicked.connect(lambda: self.zoom_slider.setValue(50))
+        
+        # レイアウトにコンポーネントを追加
+        zoom_layout.addWidget(self.zoom_slider, stretch=1)  # スライダーを伸縮可能に
+        zoom_layout.addWidget(self.zoom_label)
+        zoom_layout.addWidget(reset_button)
         zoom_widget.setLayout(zoom_layout)
-
-        layout.addWidget(menu_bar)
-        layout.addWidget(self.select_button)
-        layout.addWidget(zoom_widget)
-        self.setLayout(layout)
-
-        # ボタンとズームコントロールを返す必要はなくなりました
-        return self.select_button
+        return zoom_widget
 
     def open_file_dialog(self):
         file_name, _ = QFileDialog.getOpenFileName(
@@ -206,6 +256,8 @@ class MenuPanel(QWidget):
             self.file_selected.emit(file_name)  # シグナルを発信
 
 class AnalysisPanel(QWidget):
+    """画像分析パネル
+    ヒストグラム表示や統計情報、画像処理オプションを提供"""
     def __init__(self):
         super().__init__()
         self.setup_ui()
@@ -249,9 +301,12 @@ class AnalysisPanel(QWidget):
         self.setLayout(layout)
 
 class MainWindow(QMainWindow):
+    """メインウィンドウ
+    アプリケーションの主要なUIと機能を統合"""
+    
     def __init__(self):
         super().__init__()
-        self.setWindowTitle("PyQt6 Window")
+        self.setWindowTitle("PGM画像ビューア")  # ウィンドウタイトルを日本語に
         self.setGeometry(100, 100, 1200, 800)
         
         # メインウィジェットとレイアウト
@@ -262,20 +317,20 @@ class MainWindow(QMainWindow):
         # 左側パネル
         left_widget = QWidget()
         left_layout = QVBoxLayout()
-        left_layout.setSpacing(10)
-        left_layout.setContentsMargins(10, 10, 10, 10)
-        
-        # 画像ビューアを先に作成
-        self.image_viewer = ImageViewer()
+        left_layout.setSpacing(5) # スペースを追加
+        left_layout.setContentsMargins(5, 5, 5, 5) # マージンを追加
         
         # メニューパネル
         self.menu_panel = MenuPanel()
         
-        # シグナルの接続
+        # 画像ビューア
+        self.image_viewer = ImageViewer()
+        
+        # シグナルの接続（シグナルが発生したときにスロットを呼び出す）
         self.menu_panel.file_selected.connect(self.load_pgm_file)
-        self.menu_panel.zoom_in_clicked.connect(self.image_viewer.zoom_in)
-        self.menu_panel.zoom_out_clicked.connect(self.image_viewer.zoom_out)
-        self.menu_panel.zoom_reset_clicked.connect(self.image_viewer.zoom_reset)
+        self.menu_panel.zoom_value_changed.connect(self.handle_zoom_value_changed)
+        # ImageViewerからのスケール変更通知を処理
+        self.image_viewer.scale_changed.connect(self.handle_scale_changed)
         
         # 左側レイアウトの構成
         left_layout.addWidget(self.menu_panel)
@@ -295,6 +350,10 @@ class MainWindow(QMainWindow):
         self.setCentralWidget(main_widget)
 
     def load_pgm_file(self, file_path):
+        """PGMファイルを読み込む
+        Parameters:
+            file_path (str): 読み込むPGMファイルのパス
+        """
         try:
             with open(file_path, 'rb') as f:
                 magic = f.readline().decode('ascii').strip()
@@ -320,7 +379,28 @@ class MainWindow(QMainWindow):
             import traceback
             traceback.print_exc()
 
+    def handle_zoom_value_changed(self, value):
+        """ズームスライダーの値変更を処理
+        Parameters:
+            value (int): スライダーの現在値（1-100）
+        """
+        scale_factor = value / 50.0
+        self.image_viewer.scale_factor = scale_factor
+        self.image_viewer.update_display()
+
+    def handle_scale_changed(self, scale_factor):
+        """ImageViewerからのスケール変更通知を処理"""
+        # スライダー値を更新（シグナルの発行を防ぐためにblockSignals使用）
+        slider_value = int(scale_factor * 50)
+        self.menu_panel.zoom_slider.blockSignals(True)
+        self.menu_panel.zoom_slider.setValue(slider_value)
+        self.menu_panel.zoom_slider.blockSignals(False)
+        # ズーム率表示を更新
+        zoom_percent = int(scale_factor * 100)
+        self.menu_panel.zoom_label.setText(f"{zoom_percent}%")
+
 def main():
+    """アプリケーションのメインエントリーポイント"""
     app = QApplication(sys.argv)
     window = MainWindow()
     window.show()
