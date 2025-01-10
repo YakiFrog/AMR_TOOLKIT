@@ -3,9 +3,22 @@ import numpy as np
 from PyQt6.QtWidgets import (QApplication, QMainWindow, QWidget, QVBoxLayout, 
                             QHBoxLayout, QMenuBar, QMenu, QLabel, QPushButton,
                             QFileDialog, QScrollArea, QSplitter, QGesture, 
-                            QPinchGesture, QSlider)
-from PyQt6.QtCore import Qt, QPoint, pyqtSignal, QEvent, QSize
-from PyQt6.QtGui import QPixmap, QImage, QWheelEvent
+                            QPinchGesture, QSlider, QCheckBox)
+from PyQt6.QtCore import Qt, QPoint, pyqtSignal, QEvent, QSize, QObject
+from PyQt6.QtGui import QPixmap, QImage, QWheelEvent, QPainter, QPen, QCursor
+from enum import Enum
+
+# 共通のスタイル定義
+COMMON_STYLES = """
+    QWidget {
+        font-size: 11px;
+    }
+"""
+
+# 共通のレイアウト設定
+LAYOUT_MARGINS = 8
+WIDGET_SPACING = 5
+STANDARD_HEIGHT = 25
 
 # ピンチジェスチャーの感度調整用定数
 SCALE_SENSITIVITY = 0.2
@@ -14,6 +27,12 @@ SCALE_SENSITIVITY = 0.2
 MIN_SCALE = 0.02  # 1/50 (スライダー値1に対応)
 MAX_SCALE = 2.0   # 100/50 (スライダー値100に対応)
 DEFAULT_SCALE = 1.0  # 50/50 (スライダー値50に対応)
+
+# 描画モードの定数
+class DrawingMode(Enum):
+    NONE = 0
+    PEN = 1
+    ERASER = 2
 
 class CustomScrollArea(QScrollArea):
     """カスタムスクロールエリアクラス
@@ -25,44 +44,62 @@ class CustomScrollArea(QScrollArea):
         self.setMouseTracking(True)
         self.last_pos = None
         self.mouse_pressed = False
+        self.drawing_mode_enabled = False  # 描画モード状態を追加
         
         # ジェスチャー設定を1箇所に集約
         for attr in [self, self.viewport()]:
             attr.setAttribute(Qt.WidgetAttribute.WA_AcceptTouchEvents)
         self.grabGesture(Qt.GestureType.PinchGesture)
 
+    def set_drawing_mode(self, enabled):
+        """描画モードの有効/無効を設定"""
+        self.drawing_mode_enabled = enabled
+        # 描画モード時はビューポートのマウストラッキングを有効化
+        self.viewport().setMouseTracking(enabled)
+
     def mousePressEvent(self, event):
         """マウス押下時のイベント処理
         左クリックでドラッグ開始"""
-        if event.button() == Qt.MouseButton.LeftButton:
-            self.mouse_pressed = True
-            self.last_pos = event.pos()
-            self.setCursor(Qt.CursorShape.ClosedHandCursor)
-            event.accept()
+        if self.drawing_mode_enabled:
+            # 描画モード時はイベントを親に伝播
+            event.ignore()
         else:
-            super().mousePressEvent(event)
+            # 通常モード時は既存のスクロール処理
+            if event.button() == Qt.MouseButton.LeftButton:
+                self.mouse_pressed = True
+                self.last_pos = event.pos()
+                self.setCursor(Qt.CursorShape.ClosedHandCursor)
+                event.accept()
+            else:
+                super().mousePressEvent(event)
 
     def mouseReleaseEvent(self, event):
-        if event.button() == Qt.MouseButton.LeftButton:
-            self.mouse_pressed = False
-            self.setCursor(Qt.CursorShape.ArrowCursor)
-            event.accept()
+        if self.drawing_mode_enabled:
+            event.ignore()
         else:
-            super().mouseReleaseEvent(event)
+            if event.button() == Qt.MouseButton.LeftButton:
+                self.mouse_pressed = False
+                self.setCursor(Qt.CursorShape.ArrowCursor)
+                event.accept()
+            else:
+                super().mouseReleaseEvent(event)
 
     def mouseMoveEvent(self, event):
         """マウス移動時のイベント処理
         ドラッグによるスクロール処理を実装"""
-        if self.mouse_pressed and self.last_pos:
-            delta = event.pos() - self.last_pos
-            self.horizontalScrollBar().setValue(
-                self.horizontalScrollBar().value() - delta.x())
-            self.verticalScrollBar().setValue(
-                self.verticalScrollBar().value() - delta.y())
-            self.last_pos = event.pos()
-            event.accept()
+        if self.drawing_mode_enabled:
+            event.ignore()
         else:
-            super().mouseMoveEvent(event)
+            if self.mouse_pressed and self.last_pos:
+                delta = event.pos() - self.last_pos
+                self.horizontalScrollBar().setValue(
+                    self.horizontalScrollBar().value() - delta.x())
+                self.verticalScrollBar().setValue(
+                    self.verticalScrollBar().value() - delta.y())
+                self.last_pos = event.pos()
+                event.accept()
+            else:
+                super().mouseMoveEvent(event)
 
     def wheelEvent(self, event: QWheelEvent):
         if event.modifiers() & Qt.KeyboardModifier.ControlModifier:
@@ -86,23 +123,143 @@ class CustomScrollArea(QScrollArea):
                 return True
         return super().event(event)
 
+class DrawableLabel(QLabel):
+    """描画可能なラベルクラス"""
+    def __init__(self, parent=None):
+        super().__init__(parent)
+        self.drawing_enabled = False
+        self.last_pos = None
+        self.parent_viewer = None
+        self.cursor_pixmap = None  # カーソル用のピクスマップ
+        self.current_cursor_size = 0  # 現在のカーソルサイズ
+
+    def set_drawing_mode(self, enabled):
+        self.drawing_enabled = enabled
+        if enabled:
+            self.updateCursor()  # カーソルを更新
+        else:
+            self.setCursor(Qt.CursorShape.ArrowCursor)
+
+    def updateCursor(self):
+        """カーソルを更新"""
+        if not self.parent_viewer:
+            return
+
+        # 現在のツールのサイズを取得
+        size = self.parent_viewer.pen_size if self.parent_viewer.drawing_mode == DrawingMode.PEN else self.parent_viewer.eraser_size
+        
+        # スケールに応じてカーソルサイズを調整（実際の描画サイズと同じになるように計算）
+        pixmap_geometry = self.geometry()
+        if self.parent_viewer.drawing_layer.pixmap:
+            scale_x = pixmap_geometry.width() / self.parent_viewer.drawing_layer.pixmap.width()
+            scaled_size = int(size * scale_x)
+        else:
+            scaled_size = size
+            
+        # サイズが変更された場合のみ新しいカーソルを作成
+        if scaled_size != self.current_cursor_size:
+            self.current_cursor_size = scaled_size
+            # カーソルサイズを実際の描画サイズに合わせて調整（*2を削除）
+            cursor_size = max(scaled_size, 8)  # カーソルの最小サイズを8ピクセルに設定
+            
+            # カーソル用のピクスマップを作成
+            self.cursor_pixmap = QPixmap(cursor_size, cursor_size)
+            self.cursor_pixmap.fill(Qt.GlobalColor.transparent)
+            
+            # 円を描画
+            painter = QPainter(self.cursor_pixmap)
+            painter.setPen(QPen(Qt.GlobalColor.black, 1))
+            painter.setBrush(Qt.BrushStyle.NoBrush)
+            painter.drawEllipse(0, 0, cursor_size-1, cursor_size-1)
+            painter.end()
+            
+            # カーソルを設定
+            cursor = QCursor(self.cursor_pixmap, cursor_size // 2, cursor_size // 2)
+            self.setCursor(cursor)
+
+    def mousePressEvent(self, event):
+        if self.drawing_enabled and self.parent_viewer:
+            pos = event.pos()
+            self.last_pos = pos
+            self.parent_viewer.draw_line(pos, pos)  # 点を描画
+        else:
+            super().mousePressEvent(event)
+
+    def mouseMoveEvent(self, event):
+        if self.drawing_enabled and self.last_pos and self.parent_viewer:
+            pos = event.pos()
+            self.parent_viewer.draw_line(self.last_pos, pos)  # 線を描画
+            self.last_pos = pos
+            self.updateCursor()  # マウス移動時にカーソルを更新
+        else:
+            super().mouseMoveEvent(event)
+
+    def mouseReleaseEvent(self, event):
+        if self.drawing_enabled:
+            self.last_pos = None
+        else:
+            super().mouseReleaseEvent(event)
+
+class Layer(QObject):  # QObjectを継承してシグナルを使用可能に
+    """レイヤークラス"""
+    changed = pyqtSignal()  # レイヤーの状態変更通知用シグナル
+    
+    def __init__(self, name, visible=True):
+        super().__init__()
+        self.name = name
+        self.visible = visible
+        self.pixmap = None
+        self.opacity = 1.0
+
+    def set_visible(self, visible):
+        if self.visible != visible:
+            self.visible = visible
+            self.changed.emit()
+
+    def set_opacity(self, opacity):
+        new_opacity = max(0.0, min(1.0, opacity))
+        if self.opacity != new_opacity:
+            self.opacity = new_opacity
+            self.changed.emit()
+
 class ImageViewer(QWidget):
     """画像表示用ウィジェット
     PGM画像の表示とズーム機能を管理"""
     # スケール変更通知用のシグナルを追加
     scale_changed = pyqtSignal(float)
+    layer_changed = pyqtSignal()  # レイヤーの状態変更通知用
     
     def __init__(self):
         super().__init__()
         self.scale_factor = 1.0  # 画像の拡大率
-        self.current_pixmap = None  # 現在表示中の画像
+        self.drawing_mode = DrawingMode.NONE
+        self.last_point = None
+        self.pen_color = Qt.GlobalColor.black
+        self.pen_size = 2       # デフォルトのペンサイズ
+        self.eraser_size = 10   # デフォルトの消しゴムサイズ
+        
+        # レイヤー管理
+        self.layers = []
+        self.active_layer = None
+        
+        # 基本レイヤーの作成とシグナル接続
+        self.pgm_layer = Layer("PGM Layer")
+        self.drawing_layer = Layer("Drawing Layer")
+        self.layers = [self.pgm_layer, self.drawing_layer]
+        self.active_layer = self.drawing_layer
+        
+        # レイヤーの変更通知を接続
+        for layer in self.layers:
+            layer.changed.connect(self.on_layer_changed)
         
         self.setup_display()
         self.setup_scroll_area()
+        self.setup_drawing_tools()
 
     def setup_display(self):
         """画像表示用ラベルの設定を集約"""
-        self.pgm_display = QLabel()
+        self.pgm_display = DrawableLabel()
+        self.pgm_display.parent_viewer = self  # 親ビューアへの参照を設定
         self.pgm_display.setAlignment(Qt.AlignmentFlag.AlignCenter)
         self.pgm_display.setStyleSheet("background-color: white;")
 
@@ -118,12 +275,142 @@ class ImageViewer(QWidget):
         self.setLayout(QVBoxLayout())
         self.layout().addWidget(self.scroll_area)
 
+    def setup_drawing_tools(self):
+        """描画ツールの設定"""
+        tools_layout = QVBoxLayout()  # 垂直レイアウトに変更
+        
+        # ボタンのレイアウト
+        buttons_layout = QHBoxLayout()
+        
+        # ペンボタン
+        self.pen_button = QPushButton("ペン")
+        self.pen_button.setCheckable(True)
+        self.pen_button.clicked.connect(lambda: self.set_drawing_mode(DrawingMode.PEN))
+        
+        # 消しゴムボタン
+        self.eraser_button = QPushButton("消しゴム")
+        self.eraser_button.setCheckable(True)
+        self.eraser_button.clicked.connect(lambda: self.set_drawing_mode(DrawingMode.ERASER))
+        
+        buttons_layout.addWidget(self.pen_button)
+        buttons_layout.addWidget(self.eraser_button)
+        
+        # スライダーのレイアウト
+        sliders_layout = QHBoxLayout()
+        
+        # ペンの太さスライダー
+        pen_slider_layout = QVBoxLayout()
+        pen_slider_label = QLabel("ペンの太さ")
+        self.pen_slider = QSlider(Qt.Orientation.Horizontal)
+        self.pen_slider.setRange(1, 20)
+        self.pen_slider.setValue(self.pen_size)
+        self.pen_slider.valueChanged.connect(self.set_pen_size)
+        pen_slider_layout.addWidget(pen_slider_label)
+        pen_slider_layout.addWidget(self.pen_slider)
+        
+        # 消しゴムの太さスライダー
+        eraser_slider_layout = QVBoxLayout()
+        eraser_slider_label = QLabel("消しゴムの太さ")
+        self.eraser_slider = QSlider(Qt.Orientation.Horizontal)
+        self.eraser_slider.setRange(5, 50)
+        self.eraser_slider.setValue(self.eraser_size)
+        self.eraser_slider.valueChanged.connect(self.set_eraser_size)
+        eraser_slider_layout.addWidget(eraser_slider_label)
+        eraser_slider_layout.addWidget(self.eraser_slider)
+        
+        # スライダーをレイアウトに追加
+        sliders_layout.addLayout(pen_slider_layout)
+        sliders_layout.addLayout(eraser_slider_layout)
+        
+        # メインレイアウトに追加
+        tools_layout.addLayout(buttons_layout)
+        tools_layout.addLayout(sliders_layout)
+        self.layout().insertLayout(0, tools_layout)
+
+    def set_pen_size(self, size):
+        """ペンの太さを設定"""
+        self.pen_size = size
+        if self.drawing_mode == DrawingMode.PEN:
+            self.pgm_display.updateCursor()
+
+    def set_eraser_size(self, size):
+        """消しゴムの太さを設定"""
+        self.eraser_size = size
+        if self.drawing_mode == DrawingMode.ERASER:
+            self.pgm_display.updateCursor()
+
+    def set_drawing_mode(self, mode):
+        """描画モードの切り替え"""
+        self.drawing_mode = mode
+        self.pen_button.setChecked(mode == DrawingMode.PEN)
+        self.eraser_button.setChecked(mode == DrawingMode.ERASER)
+        # ラベルの描画モードを設定
+        self.pgm_display.set_drawing_mode(mode != DrawingMode.NONE)
+        # スクロールエリアの描画モードを設定
+        self.scroll_area.set_drawing_mode(mode != DrawingMode.NONE)
+        # カーソルを更新
+        if (mode != DrawingMode.NONE):
+            self.pgm_display.updateCursor()
+
+    def draw_line(self, start_pos, end_pos):
+        """2点間に線を描画"""
+        if not self.drawing_layer.pixmap or self.drawing_mode == DrawingMode.NONE:
+            return
+
+        pixmap_geometry = self.pgm_display.geometry()
+        scale_x = self.drawing_layer.pixmap.width() / pixmap_geometry.width()
+        scale_y = self.drawing_layer.pixmap.height() / pixmap_geometry.height()
+        
+        scaled_start = QPoint(int(start_pos.x() * scale_x), int(start_pos.y() * scale_y))
+        scaled_end = QPoint(int(end_pos.x() * scale_x), int(end_pos.y() * scale_y))
+
+        # スケールに応じて描画サイズを調整
+        scaled_pen_size = int(self.pen_size * scale_x)
+        scaled_eraser_size = int(self.eraser_size * scale_x)
+
+        painter = QPainter(self.drawing_layer.pixmap)
+        if self.drawing_mode == DrawingMode.PEN:
+            painter.setPen(QPen(self.pen_color, scaled_pen_size, Qt.PenStyle.SolidLine, Qt.PenCapStyle.RoundCap, Qt.PenJoinStyle.RoundJoin))
+        else:  # ERASER
+            painter.setCompositionMode(QPainter.CompositionMode.CompositionMode_Clear)
+            painter.setPen(QPen(Qt.GlobalColor.transparent, scaled_eraser_size, Qt.PenStyle.SolidLine, Qt.PenCapStyle.RoundCap, Qt.PenJoinStyle.RoundJoin))
+
+        painter.drawLine(scaled_start, scaled_end)
+        painter.end()
+
+        self.update_display()
+
+    def mousePressEvent(self, event):
+        if self.drawing_mode != DrawingMode.NONE:
+            self.last_point = event.pos()
+            self.draw_line(event.pos(), event.pos())
+            event.accept()
+        else:
+            super().mousePressEvent(event)
+
+    def mouseMoveEvent(self, event):
+        if self.drawing_mode != DrawingMode.NONE and self.last_point:
+            self.draw_line(self.last_point, event.pos())
+            self.last_point = event.pos()
+            event.accept()
+        else:
+            super().mouseMoveEvent(event)
+
+    def mouseReleaseEvent(self, event):
+        if self.drawing_mode != DrawingMode.NONE:
+            self.last_point = None
+            event.accept()
+        else:
+            super().mouseReleaseEvent(event)
+
     def load_image(self, img_array, width, height):
-        """PGM画像データを読み込んで表示"""
+        """PGM画像データを読み込んでPGMレイヤーに設定"""
         bytes_per_line = width
         q_img = QImage(img_array.data, width, height, bytes_per_line,
                     QImage.Format.Format_Grayscale8)
-        self.current_pixmap = QPixmap.fromImage(q_img)
+        self.pgm_layer.pixmap = QPixmap.fromImage(q_img)
+        self.drawing_layer.pixmap = QPixmap(self.pgm_layer.pixmap.size())
+        self.drawing_layer.pixmap.fill(Qt.GlobalColor.transparent)
         self.update_display()
 
     def zoom_in(self):
@@ -140,33 +427,53 @@ class ImageViewer(QWidget):
 
     def handle_scale_change(self, factor):
         """ジェスチャーやホイールによるスケール変更を処理"""
-        # スケール係数の範囲を制限（例: 0.1 から 10.0）
         new_scale = self.scale_factor * factor
-        # スケールの範囲をスライダーと同じに制限
         if MIN_SCALE <= new_scale <= MAX_SCALE:
             self.scale_factor = new_scale
             self.update_display()
-            # スケール変更を通知
             self.scale_changed.emit(self.scale_factor)
+            # スケール変更時にカーソルを更新
+            if self.drawing_mode != DrawingMode.NONE:
+                self.pgm_display.updateCursor()
 
     def update_display(self):
-        """画像の表示を更新
-        スケールファクターに応じて画像サイズを変更"""
-        if self.current_pixmap:
-            new_size = QSize(
-                int(self.current_pixmap.width() * self.scale_factor),
-                int(self.current_pixmap.height() * self.scale_factor)
-            )
-            if (current := self.pgm_display.pixmap()) and current.size() == new_size:
-                return
-            
-            scaled_pixmap = self.current_pixmap.scaled(
-                new_size, 
-                Qt.AspectRatioMode.KeepAspectRatio,
-                Qt.TransformationMode.FastTransformation
-            )
-            self.pgm_display.setPixmap(scaled_pixmap)
-            self.pgm_display.adjustSize() # 必要な場合に画像サイズを調整
+        """複数レイヤーを合成して表示"""
+        if not self.pgm_layer.pixmap:
+            return
+
+        # 合成用の新しいピクスマップを作成
+        result = QPixmap(self.pgm_layer.pixmap.size())
+        result.fill(Qt.GlobalColor.white)
+        
+        painter = QPainter(result)
+        
+        # 各レイヤーを順番に描画
+        for layer in self.layers:
+            if (layer.visible and layer.pixmap):
+                painter.setOpacity(layer.opacity)
+                painter.drawPixmap(0, 0, layer.pixmap)
+        
+        painter.end()
+
+        # スケーリングして表示
+        new_size = QSize(
+            int(result.width() * self.scale_factor),
+            int(result.height() * self.scale_factor)
+        )
+        
+        scaled_pixmap = result.scaled(
+            new_size,
+            Qt.AspectRatioMode.KeepAspectRatio,
+            Qt.TransformationMode.FastTransformation
+        )
+        
+        self.pgm_display.setPixmap(scaled_pixmap)
+        self.pgm_display.adjustSize()
+
+    def on_layer_changed(self):
+        """レイヤーの状態が変更された時の処理"""
+        self.update_display()
+        self.layer_changed.emit()
 
 class MenuPanel(QWidget):
     """メニューパネル
@@ -255,6 +562,55 @@ class MenuPanel(QWidget):
         if file_name:
             self.file_selected.emit(file_name)  # シグナルを発信
 
+# LayerControlウィジェットを追加
+class LayerControl(QWidget):
+    """個々のレイヤーコントロールを管理するウィジェット"""
+    def __init__(self, layer, parent=None):
+        super().__init__(parent)
+        self.layer = layer
+        self.setup_ui()
+        
+    def setup_ui(self):
+        """UIの初期化"""
+        layout = QHBoxLayout(self)
+        layout.setContentsMargins(5, 5, 5, 5)
+        
+        self.setStyleSheet("""
+            QWidget {
+                background-color: #f0f0f0;
+                border-radius: 3px;
+                padding: 5px;
+            }
+        """)
+        
+        # チェックボックスの設定
+        self.visibility_cb = QCheckBox()
+        self.visibility_cb.setChecked(self.layer.visible)
+        self.visibility_cb.stateChanged.connect(self._on_visibility_changed)
+        
+        # 名前ラベルの設定
+        name_label = QLabel(self.layer.name)
+        name_label.setMinimumWidth(100)
+        
+        # 不透明度スライダーの設定
+        self.opacity_slider = QSlider(Qt.Orientation.Horizontal)
+        self.opacity_slider.setRange(0, 100)
+        self.opacity_slider.setValue(int(self.layer.opacity * 100))
+        self.opacity_slider.valueChanged.connect(self._on_opacity_changed)
+        
+        # レイアウトに追加
+        layout.addWidget(self.visibility_cb)
+        layout.addWidget(name_label)
+        layout.addWidget(self.opacity_slider)
+    
+    def _on_visibility_changed(self, state):
+        """表示/非表示の切り替え"""
+        self.layer.set_visible(state == Qt.CheckState.Checked.value)
+    
+    def _on_opacity_changed(self, value):
+        """不透明度の変更"""
+        self.layer.set_opacity(value / 100.0)
+
 class AnalysisPanel(QWidget):
     """画像分析パネル
     ヒストグラム表示や統計情報、画像処理オプションを提供"""
@@ -267,6 +623,10 @@ class AnalysisPanel(QWidget):
         layout.setSpacing(15)
         layout.setContentsMargins(10, 10, 10, 10)
         self.setStyleSheet("QWidget { background-color: #f5f5f5; border-radius: 5px; }")
+
+        # レイヤーパネルを追加
+        self.layer_widget = self.create_layer_panel()
+        layout.addWidget(self.layer_widget)
 
         titles = ["Histogram", "Statistics", "Processing Options"]
         for title in titles:
@@ -300,12 +660,61 @@ class AnalysisPanel(QWidget):
 
         self.setLayout(layout)
 
+    def create_layer_panel(self):
+        """レイヤーパネルを作成"""
+        widget = QWidget()
+        layout = QVBoxLayout(widget)
+        
+        title_label = QLabel("Layers")
+        title_label.setStyleSheet("""
+            QLabel {
+                font-size: 14px;
+                font-weight: bold;
+                padding: 5px;
+                background-color: #e0e0e0;
+                border-radius: 3px;
+            }
+        """)
+        
+        self.layer_list = QWidget()
+        self.layer_list.setStyleSheet("""
+            QWidget {
+                background-color: white;
+                border: 1px solid #ccc;
+                border-radius: 3px;
+                padding: 10px;
+            }
+        """)
+        self.layer_list_layout = QVBoxLayout(self.layer_list)
+        self.layer_list_layout.setSpacing(5)  # ウィジェット間のスペースを設定
+        
+        layout.addWidget(title_label)
+        layout.addWidget(self.layer_list)
+        layout.setSpacing(5)  # タイトルとリスト間のスペースを設定
+        
+        return widget
+
+    def update_layer_list(self, layers):
+        """レイヤーリストを更新"""
+        # 既存のウィジェットをクリア
+        for i in reversed(range(self.layer_list_layout.count())): 
+            widget = self.layer_list_layout.itemAt(i).widget()
+            if widget:
+                widget.setParent(None)
+                widget.deleteLater()
+        
+        # 各レイヤーのコントロールを追加
+        for layer in layers:
+            layer_control = LayerControl(layer, self)
+            self.layer_list_layout.addWidget(layer_control)
+
 class MainWindow(QMainWindow):
     """メインウィンドウ
     アプリケーションの主要なUIと機能を統合"""
     
     def __init__(self):
         super().__init__()
+        self.setStyleSheet(COMMON_STYLES)
         self.setWindowTitle("PGM画像ビューア")  # ウィンドウタイトルを日本語に
         self.setGeometry(100, 100, 1200, 800)
         
@@ -338,16 +747,27 @@ class MainWindow(QMainWindow):
         left_widget.setLayout(left_layout)
         
         # 分析パネル
-        analysis_panel = AnalysisPanel()
+        self.analysis_panel = AnalysisPanel()
         
         # スプリッタの設定
         splitter.addWidget(left_widget)
-        splitter.addWidget(analysis_panel)
+        splitter.addWidget(self.analysis_panel)
         splitter.setSizes([600, 400])
         
         main_layout.addWidget(splitter)
         main_widget.setLayout(main_layout)
         self.setCentralWidget(main_widget)
+
+        # レイヤー状態変更時の更新処理を接続
+        self.image_viewer.layer_changed.connect(self.update_layer_panel)
+        
+        # 初期レイヤーパネルの更新を追加
+        self.update_layer_panel()  # この行を追加
+
+    def update_layer_panel(self):
+        """レイヤーパネルの表示を更新"""
+        if hasattr(self, 'analysis_panel') and hasattr(self, 'image_viewer'):
+            self.analysis_panel.update_layer_list(self.image_viewer.layers)
 
     def load_pgm_file(self, file_path):
         """PGMファイルを読み込む
