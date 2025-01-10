@@ -58,6 +58,16 @@ class Waypoint:
         degrees = int(self.angle * 180 / np.pi)  # ラジアンを度に変換
         self.display_name = f"#{self.number:02d} ({self.x}, {self.y}) {degrees}°"
 
+    @classmethod
+    def reset_counter(cls):
+        """カウンターをリセット"""
+        cls.counter = 0
+
+    def renumber(self, new_number):
+        """ウェイポイントの番号を振り直し"""
+        self.number = new_number
+        self.update_display_name()
+
 class CustomScrollArea(QScrollArea):
     """カスタムスクロールエリアクラス
     画像の表示領域とスクロール・ズーム機能を提供"""
@@ -290,6 +300,7 @@ class ImageViewer(QWidget):
     scale_changed = Signal(float)
     layer_changed = Signal()  # レイヤーの状態変更通知用
     waypoint_added = Signal(Waypoint)  # ウェイポイント追加通知用のシグナル
+    waypoint_removed = Signal(int)  # 削除シグナルを追加
     
     def __init__(self):
         super().__init__()
@@ -656,6 +667,32 @@ class ImageViewer(QWidget):
         self.update_display()
         self.layer_changed.emit()
 
+    def remove_waypoint(self, number):
+        """ウェイポイントを削除"""
+        # 削除対象のウェイポイントを除外
+        self.waypoints = [wp for wp in self.waypoints if wp.number != number]
+        
+        # ナンバリングを振り直し
+        Waypoint.reset_counter()
+        
+        # 一旦右パネルのリストをクリア
+        self.waypoint_removed.emit(number)
+        
+        # ウェイポイントを順番に振り直してUIを更新
+        for wp in self.waypoints:
+            Waypoint.counter += 1
+            wp.renumber(Waypoint.counter)
+            self.waypoint_added.emit(wp)
+        
+        self.update_display()
+
+    def remove_all_waypoints(self):
+        """全てのウェイポイントを削除"""
+        self.waypoints.clear()
+        Waypoint.reset_counter()
+        self.waypoint_removed.emit(-1)  # 特別な値-1で全削除を通知
+        self.update_display()
+
 class MenuPanel(QWidget):
     """メニューパネル
     ファイル操作とズーム制御のUIを提供"""
@@ -803,9 +840,13 @@ class LayerControl(QWidget):
 
 class RightPanel(QWidget):
     """右側のパネル"""
+    waypoint_delete_requested = Signal(int)  # 新しいシグナルを追加
+    all_waypoints_delete_requested = Signal()  # 新しいシグナル
+    
     def __init__(self):
         super().__init__()
         self.setup_ui()
+        self.waypoint_widgets = {}  # ウェイポイントウィジェットを保持する辞書を追加
 
     def setup_ui(self):
         layout = QVBoxLayout()
@@ -894,17 +935,43 @@ class RightPanel(QWidget):
         layout = QVBoxLayout(widget)
         layout.setSpacing(5)
         
+        # ヘッダー部分のレイアウト
+        header_layout = QHBoxLayout()
+        
+        # タイトル
         title_label = QLabel("Waypoints")
         title_label.setStyleSheet("""
             QLabel {
                 font-size: 14px;
                 font-weight: bold;
-                padding: 5px;  /* padding を 10px から 5px に変更 */
+                padding: 5px;
                 background-color: #e0e0e0;
                 border-radius: 3px;
             }
         """)
-
+        
+        # 全削除ボタン
+        clear_button = QPushButton("×")
+        clear_button.setFixedSize(20, 20)
+        clear_button.setToolTip("すべてのウェイポイントを削除")
+        clear_button.setStyleSheet("""
+            QPushButton {
+                background-color: #ff6b6b;
+                color: white;
+                border-radius: 10px;
+                font-weight: bold;
+                font-size: 12px;
+            }
+            QPushButton:hover {
+                background-color: #ff5252;
+            }
+        """)
+        clear_button.clicked.connect(self.all_waypoints_delete_requested.emit)
+        
+        header_layout.addWidget(title_label)
+        header_layout.addStretch()  # タイトルとボタンの間にスペースを追加
+        header_layout.addWidget(clear_button)
+        
         # スクロールエリアの作成
         scroll_area = QScrollArea()
         scroll_area.setWidgetResizable(True)
@@ -936,31 +1003,50 @@ class RightPanel(QWidget):
         scroll_area.setMinimumHeight(150)
         scroll_area.setMaximumHeight(300)
         
-        layout.addWidget(title_label)
+        layout.addLayout(header_layout)  # ヘッダーレイアウトを先頭に追加
         layout.addWidget(scroll_area)
         
         return widget
 
     def add_waypoint_to_list(self, waypoint):
         """ウェイポイントリストに新しいウェイポイントを追加"""
-        # 既存のラベルを更新または新規作成
-        for i in range(self.waypoint_list_layout.count()):
-            label = self.waypoint_list_layout.itemAt(i).widget()
-            if label and label.property("waypoint_number") == waypoint.number:
-                label.setText(waypoint.display_name)
-                return
+        # 既存のウィジェットを更新または新規作成
+        if waypoint.number in self.waypoint_widgets:
+            self.waypoint_widgets[waypoint.number].update_label(waypoint.display_name)
+            return
 
-        waypoint_label = QLabel(waypoint.display_name)
-        waypoint_label.setProperty("waypoint_number", waypoint.number)
-        waypoint_label.setStyleSheet("""
-            QLabel {
-                padding: 5px;
-                border-bottom: 1px solid #eee;
-                font-size: 14px;
-                font-weight: 500;
-            }
-        """)
-        self.waypoint_list_layout.addWidget(waypoint_label)
+        # 新しいウェイポイントアイテムを作成
+        waypoint_item = WaypointListItem(waypoint)
+        self.waypoint_widgets[waypoint.number] = waypoint_item
+        # 削除シグナルを親パネルのシグナルに接続
+        waypoint_item.delete_clicked.connect(self.waypoint_delete_requested.emit)
+        self.waypoint_list_layout.addWidget(waypoint_item)
+
+    def remove_waypoint_from_list(self, number):
+        """ウェイポイントをリストから削除"""
+        if number == -1:  # 全削除の場合
+            self.clear_waypoint_list()
+            return
+            
+        if number in self.waypoint_widgets:
+            # 古いウィジェットを削除
+            widget = self.waypoint_widgets.pop(number)
+            self.waypoint_list_layout.removeWidget(widget)
+            widget.deleteLater()
+            
+            # 残りのウィジェットを全て削除（再ナンバリングのため）
+            for widget in self.waypoint_widgets.values():
+                self.waypoint_list_layout.removeWidget(widget)
+                widget.deleteLater()
+            self.waypoint_widgets.clear()
+
+    def clear_waypoint_list(self):
+        """ウェイポイントリストをクリア"""
+        while self.waypoint_list_layout.count():
+            item = self.waypoint_list_layout.takeAt(0)
+            if widget := item.widget():
+                widget.deleteLater()
+        self.waypoint_widgets.clear()
 
     def update_layer_list(self, layers):
         """レイヤーリストを更新"""
@@ -975,6 +1061,63 @@ class RightPanel(QWidget):
         for layer in layers:
             layer_control = LayerControl(layer, self)
             self.layer_list_layout.addWidget(layer_control)
+
+class WaypointListItem(QWidget):
+    """ウェイポイントリストの各アイテム用ウィジェット"""
+    delete_clicked = Signal(int)
+
+    def __init__(self, waypoint):
+        super().__init__()
+        self.waypoint_number = waypoint.number
+        
+        # レイアウト設定
+        layout = QHBoxLayout(self)
+        layout.setContentsMargins(5, 2, 5, 2)
+        layout.setSpacing(5)
+        
+        # ラベル
+        self.label = QLabel(waypoint.display_name)
+        self.label.setStyleSheet("""
+            QLabel {
+                font-size: 14px;
+                font-weight: 500;
+            }
+        """)
+        
+        # 削除ボタン
+        delete_button = QPushButton("×")
+        delete_button.setFixedSize(20, 20)
+        delete_button.setStyleSheet("""
+            QPushButton {
+                background-color: #ff6b6b;
+                color: white;
+                border-radius: 10px;
+                font-weight: bold;
+                font-size: 12px;
+            }
+            QPushButton:hover {
+                background-color: #ff5252;
+            }
+        """)
+        delete_button.clicked.connect(lambda: self.delete_clicked.emit(self.waypoint_number))
+        
+        layout.addWidget(self.label, stretch=1)
+        layout.addWidget(delete_button)
+        
+        # ボーダースタイル
+        self.setStyleSheet("""
+            WaypointListItem {
+                border-bottom: 1px solid #eee;
+                background-color: white;
+            }
+            WaypointListItem:hover {
+                background-color: #f5f5f5;
+            }
+        """)
+
+    def update_label(self, text):
+        """ラベルテキストを更新"""
+        self.label.setText(text)
 
 class MainWindow(QMainWindow):
     """メインウィンドウ
@@ -1034,6 +1177,15 @@ class MainWindow(QMainWindow):
 
         # ウェイポイント追加時の処理を接続
         self.image_viewer.waypoint_added.connect(self.analysis_panel.add_waypoint_to_list)
+
+        # ウェイポイント削除時の処理を接続
+        self.image_viewer.waypoint_removed.connect(self.analysis_panel.remove_waypoint_from_list)
+        
+        # 削除ボタンクリック時の処理を接続（修正版）
+        self.analysis_panel.waypoint_delete_requested.connect(self.image_viewer.remove_waypoint)
+
+        # 全ウェイポイント削除時の処理を接続
+        self.analysis_panel.all_waypoints_delete_requested.connect(self.image_viewer.remove_all_waypoints)
 
     def update_layer_panel(self):
         """レイヤーパネルの表示を更新"""
