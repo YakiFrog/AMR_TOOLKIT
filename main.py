@@ -33,6 +33,30 @@ class DrawingMode(Enum):
     NONE = 0
     PEN = 1
     ERASER = 2
+    WAYPOINT = 3  # ウェイポイントモードを追加
+
+class Waypoint:
+    """ウェイポイントを管理するクラス"""
+    counter = 0
+    
+    def __init__(self, x, y, angle=0, name=None):
+        Waypoint.counter += 1
+        self.number = Waypoint.counter
+        self.x = x
+        self.y = y
+        self.angle = angle  # 角度を追加（ラジアン）
+        self.name = name if name else f"Waypoint {self.number}"
+        self.update_display_name()
+
+    def set_angle(self, angle):
+        """角度を設定し、表示名を更新"""
+        self.angle = angle
+        self.update_display_name()
+
+    def update_display_name(self):
+        """表示名を更新"""
+        degrees = int(self.angle * 180 / np.pi)  # ラジアンを度に変換
+        self.display_name = f"#{self.number:02d} ({self.x}, {self.y}) {degrees}°"
 
 class CustomScrollArea(QScrollArea):
     """カスタムスクロールエリアクラス
@@ -125,6 +149,10 @@ class CustomScrollArea(QScrollArea):
 
 class DrawableLabel(QLabel):
     """描画可能なラベルクラス"""
+    waypoint_clicked = Signal(QPoint)  # ウェイポイト追加用のシグナルを追加
+    waypoint_updated = Signal(Waypoint)  # 角度更新用のシグナルを追加
+    waypoint_completed = Signal(QPoint)  # 角度確定用のシグナルを追加
+
     def __init__(self, parent=None):
         super().__init__(parent)
         self.drawing_enabled = False
@@ -132,6 +160,10 @@ class DrawableLabel(QLabel):
         self.parent_viewer = None
         self.cursor_pixmap = None  # カーソル用のピクスマップ
         self.current_cursor_size = 0  # 現在のカーソルサイズ
+        self.setMouseTracking(True)
+        self.temp_waypoint = None  # 一時的なウェイポイント保存用
+        self.is_setting_angle = False  # 角度設定中フラグ
+        self.click_pos = None  # クリック位置を保存
 
     def set_drawing_mode(self, enabled):
         self.drawing_enabled = enabled
@@ -179,23 +211,52 @@ class DrawableLabel(QLabel):
 
     def mousePressEvent(self, event):
         if self.drawing_enabled and self.parent_viewer:
-            pos = event.pos()
-            self.last_pos = pos
-            self.parent_viewer.draw_line(pos, pos)  # 点を描画
+            if self.parent_viewer.drawing_mode == DrawingMode.WAYPOINT:
+                if event.button() == Qt.MouseButton.LeftButton:
+                    self.click_pos = event.pos()  # クリック位置を保存
+                    self.is_setting_angle = True
+                    self.waypoint_clicked.emit(event.pos())
+            else:
+                pos = event.pos()
+                self.last_pos = pos
+                self.parent_viewer.draw_line(pos, pos)  # 点を描画
+        elif event.button() == Qt.MouseButton.RightButton:
+            # 右クリックでウェイポイントを追加
+            self.waypoint_clicked.emit(event.pos())
         else:
             super().mousePressEvent(event)
 
     def mouseMoveEvent(self, event):
-        if self.drawing_enabled and self.last_pos and self.parent_viewer:
-            pos = event.pos()
-            self.parent_viewer.draw_line(self.last_pos, pos)  # 線を描画
-            self.last_pos = pos
-            self.updateCursor()  # マウス移動時にカーソルを更新
+        if self.drawing_enabled and self.parent_viewer:
+            if self.is_setting_angle and self.parent_viewer.drawing_mode == DrawingMode.WAYPOINT:
+                if self.temp_waypoint and self.click_pos:
+                    # プレビュー用の角度計算（一時的な表示用）
+                    dx = event.pos().x() - self.click_pos.x()
+                    dy = event.pos().y() - self.click_pos.y()
+                    angle = np.arctan2(dy, dx)
+                    self.temp_waypoint.set_angle(angle)
+                    self.waypoint_updated.emit(self.temp_waypoint)
+            elif self.last_pos:
+                pos = event.pos()
+                self.parent_viewer.draw_line(self.last_pos, pos)  # 線を描画
+                self.last_pos = pos
+                self.updateCursor()  # マウス移動時にカーソルを更新
         else:
             super().mouseMoveEvent(event)
 
     def mouseReleaseEvent(self, event):
         if self.drawing_enabled:
+            if self.is_setting_angle and self.click_pos:
+                # マウスボタンを離した位置で最終的な角度を計算
+                dx = event.pos().x() - self.click_pos.x()
+                dy = event.pos().y() - self.click_pos.y()
+                if self.temp_waypoint:
+                    final_angle = np.arctan2(dy, dx)
+                    self.temp_waypoint.set_angle(final_angle)
+                    self.waypoint_updated.emit(self.temp_waypoint)
+                self.is_setting_angle = False
+                self.click_pos = None
+                self.temp_waypoint = None
             self.last_pos = None
         else:
             super().mouseReleaseEvent(event)
@@ -228,6 +289,7 @@ class ImageViewer(QWidget):
     # スケール変更通知用のシグナルを追加
     scale_changed = Signal(float)
     layer_changed = Signal()  # レイヤーの状態変更通知用
+    waypoint_added = Signal(Waypoint)  # ウェイポイント追加通知用のシグナル
     
     def __init__(self):
         super().__init__()
@@ -252,6 +314,9 @@ class ImageViewer(QWidget):
         for layer in self.layers:
             layer.changed.connect(self.on_layer_changed)
         
+        self.waypoints = []  # ウェイポイントのリスト
+        self.waypoint_size = 10  # ウェイポイントの表示サイズ
+
         self.setup_display()
         self.setup_scroll_area()
         self.setup_drawing_tools()
@@ -262,6 +327,8 @@ class ImageViewer(QWidget):
         self.pgm_display.parent_viewer = self  # 親ビューアへの参照を設定
         self.pgm_display.setAlignment(Qt.AlignmentFlag.AlignCenter)
         self.pgm_display.setStyleSheet("background-color: white;")
+        self.pgm_display.waypoint_clicked.connect(self.add_waypoint)
+        self.pgm_display.waypoint_updated.connect(self.update_waypoint)
 
     def setup_scroll_area(self):
         """スクロールエリアの設定を集約"""
@@ -277,7 +344,7 @@ class ImageViewer(QWidget):
 
     def setup_drawing_tools(self):
         """描画ツールの設定"""
-        tools_layout = QVBoxLayout()  # 垂直レイアウトに変更
+        tools_layout = QVBoxLayout()
         
         # ボタンのレイアウト
         buttons_layout = QHBoxLayout()
@@ -292,8 +359,14 @@ class ImageViewer(QWidget):
         self.eraser_button.setCheckable(True)
         self.eraser_button.clicked.connect(lambda: self.set_drawing_mode(DrawingMode.ERASER))
         
+        # ウェイポイントボタンを追加
+        self.waypoint_button = QPushButton("ウェイポイント")
+        self.waypoint_button.setCheckable(True)
+        self.waypoint_button.clicked.connect(lambda: self.set_drawing_mode(DrawingMode.WAYPOINT))
+        
         buttons_layout.addWidget(self.pen_button)
         buttons_layout.addWidget(self.eraser_button)
+        buttons_layout.addWidget(self.waypoint_button)
         
         # スライダーのレイアウト
         sliders_layout = QHBoxLayout()
@@ -346,6 +419,7 @@ class ImageViewer(QWidget):
             self.drawing_mode = DrawingMode.NONE
             self.pen_button.setChecked(False)
             self.eraser_button.setChecked(False)
+            self.waypoint_button.setChecked(False)
             self.pgm_display.set_drawing_mode(False)
             self.scroll_area.set_drawing_mode(False)
             return
@@ -354,13 +428,18 @@ class ImageViewer(QWidget):
         self.drawing_mode = mode
         self.pen_button.setChecked(mode == DrawingMode.PEN)
         self.eraser_button.setChecked(mode == DrawingMode.ERASER)
+        self.waypoint_button.setChecked(mode == DrawingMode.WAYPOINT)
+        
         # ラベルの描画モードを設定
         self.pgm_display.set_drawing_mode(mode != DrawingMode.NONE)
         # スクロールエリアの描画モードを設定
         self.scroll_area.set_drawing_mode(mode != DrawingMode.NONE)
         # カーソルを更新
-        if (mode != DrawingMode.NONE):
-            self.pgm_display.updateCursor()
+        if mode != DrawingMode.NONE:
+            if mode == DrawingMode.WAYPOINT:
+                self.pgm_display.setCursor(Qt.CursorShape.CrossCursor)
+            else:
+                self.pgm_display.updateCursor()
 
     def draw_line(self, start_pos, end_pos):
         """2点間に線を描画"""
@@ -446,6 +525,31 @@ class ImageViewer(QWidget):
             if self.drawing_mode != DrawingMode.NONE:
                 self.pgm_display.updateCursor()
 
+    def add_waypoint(self, pos):
+        """ウェイポイントを追加"""
+        if not self.pgm_layer.pixmap:
+            return
+
+        # クリック位置をピクセル座標に変換
+        pixmap_geometry = self.pgm_display.geometry()
+        scale_x = self.pgm_layer.pixmap.width() / pixmap_geometry.width()
+        scale_y = self.pgm_layer.pixmap.height() / pixmap_geometry.height()
+        
+        x = int(pos.x() * scale_x)
+        y = int(pos.y() * scale_y)
+        
+        waypoint = Waypoint(x, y)
+        self.waypoints.append(waypoint)
+        self.pgm_display.temp_waypoint = waypoint  # 一時的なウェイポイントを設定
+        self.waypoint_added.emit(waypoint)
+        self.update_display()
+
+    def update_waypoint(self, waypoint):
+        """ウェイポイントの更新（角度変更時）"""
+        self.update_display()
+        # 対応するラベルを更新するためにシグナルを再発行
+        self.waypoint_added.emit(waypoint)
+
     def update_display(self):
         """複数レイヤーを合成して表示"""
         if not self.pgm_layer.pixmap:
@@ -463,6 +567,39 @@ class ImageViewer(QWidget):
                 painter.setOpacity(layer.opacity)
                 painter.drawPixmap(0, 0, layer.pixmap)
         
+        # ウェイポイントの描画を追加
+        if self.waypoints and result:
+            pen = QPen(Qt.GlobalColor.red)
+            pen.setWidth(2)
+            painter.setPen(pen)
+            
+            for waypoint in self.waypoints:
+                # ウェイポイントの位置に赤い十字を描画
+                x, y = waypoint.x, waypoint.y
+                size = self.waypoint_size
+                # painter.drawLine(x - size, y, x + size, y)
+                # painter.drawLine(x, y - size, x, y + size)
+                
+                # 角度を示す線を描画
+                angle_line_length = size * 3  # 線の長さを調整
+                end_x = x + int(angle_line_length * np.cos(waypoint.angle))
+                end_y = y + int(angle_line_length * np.sin(waypoint.angle))
+                painter.drawLine(x, y, end_x, end_y)
+                
+                # 矢印の先端を描画
+                arrow_size = size // 2
+                angle = waypoint.angle
+                arrow_angle1 = angle + np.pi * 3/4  # 矢印の左側の角度
+                arrow_angle2 = angle - np.pi * 3/4  # 矢印の右側の角度
+                
+                arrow_x1 = end_x + int(arrow_size * np.cos(arrow_angle1))
+                arrow_y1 = end_y + int(arrow_size * np.sin(arrow_angle1))
+                arrow_x2 = end_x + int(arrow_size * np.cos(arrow_angle2))
+                arrow_y2 = end_y + int(arrow_size * np.sin(arrow_angle2))
+                
+                painter.drawLine(end_x, end_y, arrow_x1, arrow_y1)
+                painter.drawLine(end_x, end_y, arrow_x2, arrow_y2)
+            
         painter.end()
 
         # スケーリングして表示
@@ -604,23 +741,6 @@ class LayerControl(QWidget):
         # チェックボックスの設定
         self.visibility_cb = QCheckBox()
         self.visibility_cb.setChecked(self.layer.visible)
-        self.visibility_cb.stateChanged.connect(self._on_visibility_changed)
-        
-        # 名前ラベルの設定
-        name_label = QLabel(self.layer.name)
-        name_label.setMinimumWidth(100)
-        
-        # 不透明度スライダーの設定
-        self.opacity_slider = QSlider(Qt.Orientation.Horizontal)
-        self.opacity_slider.setRange(0, 100)
-        self.opacity_slider.setValue(int(self.layer.opacity * 100))
-        self.opacity_slider.valueChanged.connect(self._on_opacity_changed)
-        
-        # レイアウトに追加
-        layout.addWidget(self.visibility_cb)
-        layout.addWidget(name_label)
-        layout.addWidget(self.opacity_slider)
-    
     def _on_visibility_changed(self, state):
         """表示/非表示の切り替え"""
         self.layer.set_visible(state == Qt.CheckState.Checked.value)
@@ -645,8 +765,12 @@ class RightPanel(QWidget):
         self.layer_widget = self.create_layer_panel()
         layout.addWidget(self.layer_widget)
         
-        # 他のパネルを追加
-        titles = ["Panel 1", "Panel 2", "Panel 3"]
+        # ウェイポイントリストパネルを追加
+        self.waypoint_widget = self.create_waypoint_panel()
+        layout.addWidget(self.waypoint_widget)
+        
+        # Panel 2, 3を追加
+        titles = ["Panel 2", "Panel 3"]
         for title in titles:
             widget = QWidget()
             widget_layout = QVBoxLayout(widget)
@@ -700,7 +824,6 @@ class RightPanel(QWidget):
                 background-color: white;
                 border: 1px solid #ccc;
                 border-radius: 3px;
-                padding: 10px;
             }
         """)
         self.layer_list_layout = QVBoxLayout(self.layer_list)
@@ -711,6 +834,80 @@ class RightPanel(QWidget):
         layout.setSpacing(5)  # タイトルとリスト間のスペースを設定
         
         return widget
+
+    def create_waypoint_panel(self):
+        """ウェイポイントリストパネルを作成"""
+        widget = QWidget()
+        layout = QVBoxLayout(widget)
+        layout.setSpacing(5)
+        
+        title_label = QLabel("Waypoints")
+        title_label.setStyleSheet("""
+            QLabel {
+                font-size: 14px;
+                font-weight: bold;
+                padding: 5px;  /* padding を 10px から 5px に変更 */
+                background-color: #e0e0e0;
+                border-radius: 3px;
+            }
+        """)
+
+        # スクロールエリアの作成
+        scroll_area = QScrollArea()
+        scroll_area.setWidgetResizable(True)
+        scroll_area.setStyleSheet("""
+            QScrollArea {
+                background-color: white;
+                border: 1px solid #ccc;
+                border-radius: 3px;
+            }
+        """)
+
+        # ウェイポイントリストのコンテナウィジェット
+        self.waypoint_list = QWidget()
+        self.waypoint_list.setStyleSheet("""
+            QWidget {
+                background-color: white;
+                padding: 5px;
+            }
+        """)
+        
+        self.waypoint_list_layout = QVBoxLayout(self.waypoint_list)
+        self.waypoint_list_layout.setSpacing(2)
+        self.waypoint_list_layout.setAlignment(Qt.AlignmentFlag.AlignTop)
+        
+        # スクロールエリアにウェイポイントリストを設定
+        scroll_area.setWidget(self.waypoint_list)
+        
+        # 固定の高さを設定（必要に応じて調整）
+        scroll_area.setMinimumHeight(200)
+        scroll_area.setMaximumHeight(200)
+        
+        layout.addWidget(title_label)
+        layout.addWidget(scroll_area)
+        
+        return widget
+
+    def add_waypoint_to_list(self, waypoint):
+        """ウェイポイントリストに新しいウェイポイントを追加"""
+        # 既存のラベルを更新または新規作成
+        for i in range(self.waypoint_list_layout.count()):
+            label = self.waypoint_list_layout.itemAt(i).widget()
+            if label and label.property("waypoint_number") == waypoint.number:
+                label.setText(waypoint.display_name)
+                return
+
+        waypoint_label = QLabel(waypoint.display_name)
+        waypoint_label.setProperty("waypoint_number", waypoint.number)
+        waypoint_label.setStyleSheet("""
+            QLabel {
+                padding: 5px;
+                border-bottom: 1px solid #eee;
+                font-size: 14px;
+                font-weight: 500;
+            }
+        """)
+        self.waypoint_list_layout.addWidget(waypoint_label)
 
     def update_layer_list(self, layers):
         """レイヤーリストを更新"""
@@ -781,6 +978,9 @@ class MainWindow(QMainWindow):
         
         # 初期レイヤーパネルの更新を追加
         self.update_layer_panel()  # この行を追加
+
+        # ウェイポイント追加時の処理を接続
+        self.image_viewer.waypoint_added.connect(self.analysis_panel.add_waypoint_to_list)
 
     def update_layer_panel(self):
         """レイヤーパネルの表示を更新"""
