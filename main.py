@@ -341,6 +341,16 @@ class ImageViewer(QWidget):
 
     def set_drawing_mode(self, mode):
         """描画モードの切り替え"""
+        # 同じモードを選択した場合は描画モードを解除
+        if self.drawing_mode == mode:
+            self.drawing_mode = DrawingMode.NONE
+            self.pen_button.setChecked(False)
+            self.eraser_button.setChecked(False)
+            self.pgm_display.set_drawing_mode(False)
+            self.scroll_area.set_drawing_mode(False)
+            return
+
+        # 異なるモードを選択した場合は描画モードを変更
         self.drawing_mode = mode
         self.pen_button.setChecked(mode == DrawingMode.PEN)
         self.eraser_button.setChecked(mode == DrawingMode.ERASER)
@@ -611,9 +621,8 @@ class LayerControl(QWidget):
         """不透明度の変更"""
         self.layer.set_opacity(value / 100.0)
 
-class AnalysisPanel(QWidget):
-    """画像分析パネル
-    ヒストグラム表示や統計情報、画像処理オプションを提供"""
+class RightPanel(QWidget):
+    """右側のパネル"""
     def __init__(self):
         super().__init__()
         self.setup_ui()
@@ -627,8 +636,9 @@ class AnalysisPanel(QWidget):
         # レイヤーパネルを追加
         self.layer_widget = self.create_layer_panel()
         layout.addWidget(self.layer_widget)
-
-        titles = ["Histogram", "Statistics", "Processing Options"]
+        
+        # 他のパネルを追加
+        titles = ["Panel 1", "Panel 2", "Panel 3"]
         for title in titles:
             widget = QWidget()
             widget_layout = QVBoxLayout(widget)
@@ -715,7 +725,7 @@ class MainWindow(QMainWindow):
     def __init__(self):
         super().__init__()
         self.setStyleSheet(COMMON_STYLES)
-        self.setWindowTitle("PGM画像ビューア")  # ウィンドウタイトルを日本語に
+        self.setWindowTitle("Map and Waypoint Editor")  # ウィンドウタイトルを日本語に
         self.setGeometry(100, 100, 1200, 800)
         
         # メインウィジェットとレイアウト
@@ -746,8 +756,8 @@ class MainWindow(QMainWindow):
         left_layout.addWidget(self.image_viewer)
         left_widget.setLayout(left_layout)
         
-        # 分析パネル
-        self.analysis_panel = AnalysisPanel()
+        # 右側パネル
+        self.analysis_panel = RightPanel()
         
         # スプリッタの設定
         splitter.addWidget(left_widget)
