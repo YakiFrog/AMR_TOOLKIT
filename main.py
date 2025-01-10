@@ -1,11 +1,11 @@
 import sys
 import numpy as np
-from PyQt6.QtWidgets import (QApplication, QMainWindow, QWidget, QVBoxLayout, 
-                            QHBoxLayout, QMenuBar, QMenu, QLabel, QPushButton,
-                            QFileDialog, QScrollArea, QSplitter, QGesture, 
-                            QPinchGesture, QSlider, QCheckBox)
-from PyQt6.QtCore import Qt, QPoint, pyqtSignal, QEvent, QSize, QObject
-from PyQt6.QtGui import QPixmap, QImage, QWheelEvent, QPainter, QPen, QCursor
+from PySide6.QtWidgets import (QApplication, QMainWindow, QWidget, QVBoxLayout, 
+                              QHBoxLayout, QMenuBar, QMenu, QLabel, QPushButton,
+                              QFileDialog, QScrollArea, QSplitter, QGesture, 
+                              QPinchGesture, QSlider, QCheckBox)
+from PySide6.QtCore import Qt, QPoint, Signal, QEvent, QSize
+from PySide6.QtGui import QPixmap, QImage, QWheelEvent, QPainter, QPen, QCursor
 from enum import Enum
 
 # 共通のスタイル定義
@@ -37,7 +37,7 @@ class DrawingMode(Enum):
 class CustomScrollArea(QScrollArea):
     """カスタムスクロールエリアクラス
     画像の表示領域とスクロール・ズーム機能を提供"""
-    scale_changed = pyqtSignal(float)
+    scale_changed = Signal(float)
 
     def __init__(self):
         super().__init__()
@@ -200,9 +200,9 @@ class DrawableLabel(QLabel):
         else:
             super().mouseReleaseEvent(event)
 
-class Layer(QObject):  # QObjectを継承してシグナルを使用可能に
+class Layer(QWidget):  # QObjectを継承してシグナルを使用可能に
     """レイヤークラス"""
-    changed = pyqtSignal()  # レイヤーの状態変更通知用シグナル
+    changed = Signal()  # レイヤーの状態変更通知用シグナル
     
     def __init__(self, name, visible=True):
         super().__init__()
@@ -226,8 +226,8 @@ class ImageViewer(QWidget):
     """画像表示用ウィジェット
     PGM画像の表示とズーム機能を管理"""
     # スケール変更通知用のシグナルを追加
-    scale_changed = pyqtSignal(float)
-    layer_changed = pyqtSignal()  # レイヤーの状態変更通知用
+    scale_changed = Signal(float)
+    layer_changed = Signal()  # レイヤーの状態変更通知用
     
     def __init__(self):
         super().__init__()
@@ -480,8 +480,8 @@ class MenuPanel(QWidget):
     ファイル操作とズーム制御のUIを提供"""
     
     # シグナルの定義
-    file_selected = pyqtSignal(str)  # ファイル選択時のシグナル
-    zoom_value_changed = pyqtSignal(int)  # ズーム値変更時のシグナル
+    file_selected = Signal(str)  # ファイル選択時のシグナル
+    zoom_value_changed = Signal(int)  # ズーム値変更時のシグナル
     
     def __init__(self, parent=None):
         super().__init__(parent)
