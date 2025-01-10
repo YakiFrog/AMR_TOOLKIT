@@ -517,16 +517,22 @@ class MenuPanel(QWidget):
         menu_bar.addMenu(file_menu)
         menu_bar.addMenu(edit_menu)
 
-        # ボタン
+        # ファイル選択部分のレイアウト
+        file_layout = QHBoxLayout()
         self.select_button = QPushButton("Select PGM File")
         self.select_button.clicked.connect(self.open_file_dialog)
+        self.file_name_label = QLabel("No file selected")  # ファイル名表示用ラベル
+        self.file_name_label.setStyleSheet("color: #666; padding: 0 10px;")
+        
+        file_layout.addWidget(self.select_button)
+        file_layout.addWidget(self.file_name_label, stretch=1)  # stretchを1に設定して余白を埋める
         
         # ズームコントロールをメソッドに分離
         zoom_widget = self.create_zoom_controls()
         
         layout.addWidget(menu_bar)
-        layout.addWidget(self.select_button) # 1. ファイル選択ボタン
-        layout.addWidget(zoom_widget) # 2. ズームコントロール
+        layout.addLayout(file_layout)  # ファイル選択部分を追加
+        layout.addWidget(zoom_widget)
         self.setLayout(layout)
 
     def create_zoom_controls(self):
@@ -570,7 +576,9 @@ class MenuPanel(QWidget):
             "PGM Files (*.pgm);;All Files (*)"
         )
         if file_name:
-            self.file_selected.emit(file_name)  # シグナルを発信
+            # ファイルのベース名（パスを除いた部分）を表示
+            self.file_name_label.setText(file_name.split('/')[-1])
+            self.file_selected.emit(file_name)
 
 # LayerControlウィジェットを追加
 class LayerControl(QWidget):
