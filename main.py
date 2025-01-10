@@ -307,7 +307,8 @@ class ImageViewer(QWidget):
         # 基本レイヤーの作成とシグナル接続
         self.pgm_layer = Layer("PGM Layer")
         self.drawing_layer = Layer("Drawing Layer")
-        self.layers = [self.pgm_layer, self.drawing_layer]
+        self.waypoint_layer = Layer("Waypoint Layer")  # ウェイポイントレイヤーを追加
+        self.layers = [self.pgm_layer, self.waypoint_layer, self.drawing_layer]  # 順序を変更
         self.active_layer = self.drawing_layer
         
         # レイヤーの変更通知を接続
@@ -315,7 +316,7 @@ class ImageViewer(QWidget):
             layer.changed.connect(self.on_layer_changed)
         
         self.waypoints = []  # ウェイポイントのリスト
-        self.waypoint_size = 10  # ウェイポイントの表示サイズ
+        self.waypoint_size = 15  # ウェイポイントのサイズを大きく
 
         self.setup_display()
         self.setup_scroll_area()
@@ -335,7 +336,7 @@ class ImageViewer(QWidget):
         self.scroll_area = CustomScrollArea()
         self.scroll_area.setWidget(self.pgm_display)
         self.scroll_area.setWidgetResizable(True)
-        self.scroll_area.setMinimumSize(600, 500)
+        self.scroll_area.setMinimumSize(600, 400)
         self.scroll_area.setStyleSheet("QScrollArea { border: 2px solid #ccc; background-color: white; }")
         self.scroll_area.scale_changed.connect(self.handle_scale_change)
 
@@ -530,17 +531,19 @@ class ImageViewer(QWidget):
         if not self.pgm_layer.pixmap:
             return
 
-        # クリック位置をピクセル座標に変換
-        pixmap_geometry = self.pgm_display.geometry()
-        scale_x = self.pgm_layer.pixmap.width() / pixmap_geometry.width()
-        scale_y = self.pgm_layer.pixmap.height() / pixmap_geometry.height()
-        
-        x = int(pos.x() * scale_x)
-        y = int(pos.y() * scale_y)
+        # クリック位置を直接使用（スケール変換を行わない）
+        x = pos.x()
+        y = pos.y()
         
         waypoint = Waypoint(x, y)
         self.waypoints.append(waypoint)
-        self.pgm_display.temp_waypoint = waypoint  # 一時的なウェイポイントを設定
+        self.pgm_display.temp_waypoint = waypoint
+        
+        # ウェイポイントレイヤーの初期化（必要な場合）
+        if not self.waypoint_layer.pixmap:
+            self.waypoint_layer.pixmap = QPixmap(self.pgm_display.size())
+            self.waypoint_layer.pixmap.fill(Qt.GlobalColor.transparent)
+        
         self.waypoint_added.emit(waypoint)
         self.update_display()
 
@@ -561,45 +564,75 @@ class ImageViewer(QWidget):
         
         painter = QPainter(result)
         
-        # 各レイヤーを順番に描画
-        for layer in self.layers:
-            if (layer.visible and layer.pixmap):
-                painter.setOpacity(layer.opacity)
-                painter.drawPixmap(0, 0, layer.pixmap)
-        
-        # ウェイポイントの描画を追加
-        if self.waypoints and result:
-            pen = QPen(Qt.GlobalColor.red)
-            pen.setWidth(2)
-            painter.setPen(pen)
+        # PGMレイヤーを描画
+        if self.pgm_layer.visible and self.pgm_layer.pixmap:
+            painter.setOpacity(self.pgm_layer.opacity)
+            painter.drawPixmap(0, 0, self.pgm_layer.pixmap)
+
+        # ウェイポイントの描画を更新
+        if self.waypoints:
+            # ウェイポイントレイヤーを更新
+            self.waypoint_layer.pixmap = QPixmap(result.size())
+            self.waypoint_layer.pixmap.fill(Qt.GlobalColor.transparent)
+            wp_painter = QPainter(self.waypoint_layer.pixmap)
+            wp_painter.setRenderHint(QPainter.RenderHint.Antialiasing)  # アンチエイリアスを有効化
             
             for waypoint in self.waypoints:
-                # ウェイポイントの位置に赤い十字を描画
                 x, y = waypoint.x, waypoint.y
                 size = self.waypoint_size
-                # painter.drawLine(x - size, y, x + size, y)
-                # painter.drawLine(x, y - size, x, y + size)
                 
-                # 角度を示す線を描画
-                angle_line_length = size * 3  # 線の長さを調整
+                # 矢印の描画
+                pen = QPen(Qt.GlobalColor.red)
+                pen.setWidth(3)  # 線を太く
+                wp_painter.setPen(pen)
+                
+                angle_line_length = size * 3
                 end_x = x + int(angle_line_length * np.cos(waypoint.angle))
                 end_y = y + int(angle_line_length * np.sin(waypoint.angle))
-                painter.drawLine(x, y, end_x, end_y)
+                wp_painter.drawLine(x, y, end_x, end_y)
                 
-                # 矢印の先端を描画
+                # 矢印の先端
                 arrow_size = size // 2
                 angle = waypoint.angle
-                arrow_angle1 = angle + np.pi * 3/4  # 矢印の左側の角度
-                arrow_angle2 = angle - np.pi * 3/4  # 矢印の右側の角度
+                arrow_angle1 = angle + np.pi * 3/4
+                arrow_angle2 = angle - np.pi * 3/4
                 
                 arrow_x1 = end_x + int(arrow_size * np.cos(arrow_angle1))
                 arrow_y1 = end_y + int(arrow_size * np.sin(arrow_angle1))
                 arrow_x2 = end_x + int(arrow_size * np.cos(arrow_angle2))
                 arrow_y2 = end_y + int(arrow_size * np.sin(arrow_angle2))
                 
-                painter.drawLine(end_x, end_y, arrow_x1, arrow_y1)
-                painter.drawLine(end_x, end_y, arrow_x2, arrow_y2)
+                wp_painter.drawLine(end_x, end_y, arrow_x1, arrow_y1)
+                wp_painter.drawLine(end_x, end_y, arrow_x2, arrow_y2)
+                
+                # 番号を表示する円を描画
+                circle_radius = size
+                wp_painter.setPen(Qt.PenStyle.NoPen)
+                wp_painter.setBrush(Qt.GlobalColor.red)
+                wp_painter.drawEllipse(x - circle_radius, y - circle_radius, 
+                                     circle_radius * 2, circle_radius * 2)
+                
+                # 番号を描画
+                wp_painter.setPen(Qt.GlobalColor.white)
+                font = self.font()
+                font.setPointSize(12)  # フォントサイズを大きく
+                wp_painter.setFont(font)
+                number_text = str(waypoint.number)
+                font_metrics = wp_painter.fontMetrics()
+                text_width = font_metrics.horizontalAdvance(number_text)
+                text_height = font_metrics.height()
+                text_x = x - text_width // 2
+                text_y = y + text_height // 3
+                wp_painter.drawText(text_x, text_y, number_text)
             
+            wp_painter.end()
+
+        # 残りのレイヤーを描画
+        for layer in self.layers[1:]:  # PGMレイヤー以外を描画
+            if layer.visible and layer.pixmap:
+                painter.setOpacity(layer.opacity)
+                painter.drawPixmap(0, 0, layer.pixmap)
+        
         painter.end()
 
         # スケーリングして表示
@@ -611,7 +644,7 @@ class ImageViewer(QWidget):
         scaled_pixmap = result.scaled(
             new_size,
             Qt.AspectRatioMode.KeepAspectRatio,
-            Qt.TransformationMode.FastTransformation
+            Qt.TransformationMode.SmoothTransformation  # スムージングを有効化
         )
         
         self.pgm_display.setPixmap(scaled_pixmap)
@@ -739,8 +772,20 @@ class LayerControl(QWidget):
         """)
         
         # チェックボックスの設定
-        self.visibility_cb = QCheckBox()
+        self.visibility_cb = QCheckBox(self.layer.name)  # レイヤー名を表示
         self.visibility_cb.setChecked(self.layer.visible)
+        self.visibility_cb.stateChanged.connect(self._on_visibility_changed)  # シグナル接続を追加
+        
+        # 不透明度スライダーの設定
+        self.opacity_slider = QSlider(Qt.Orientation.Horizontal)
+        self.opacity_slider.setRange(0, 100)
+        self.opacity_slider.setValue(int(self.layer.opacity * 100))
+        self.opacity_slider.valueChanged.connect(self._on_opacity_changed)  # シグナル接続を追加
+        
+        # レイアウトに追加
+        layout.addWidget(self.visibility_cb)
+        layout.addWidget(self.opacity_slider)
+
     def _on_visibility_changed(self, state):
         """表示/非表示の切り替え"""
         self.layer.set_visible(state == Qt.CheckState.Checked.value)
@@ -794,7 +839,7 @@ class RightPanel(QWidget):
                     border-radius: 3px;
                 }
             """)
-            content.setMinimumHeight(200)
+            content.setMinimumHeight(150)
             
             widget_layout.addWidget(title_label)
             widget_layout.addWidget(content)
@@ -828,6 +873,7 @@ class RightPanel(QWidget):
         """)
         self.layer_list_layout = QVBoxLayout(self.layer_list)
         self.layer_list_layout.setSpacing(5)  # ウィジェット間のスペースを設定
+        self.layer_list.setMinimumHeight(100)
         
         layout.addWidget(title_label)
         layout.addWidget(self.layer_list)
@@ -880,8 +926,8 @@ class RightPanel(QWidget):
         scroll_area.setWidget(self.waypoint_list)
         
         # 固定の高さを設定（必要に応じて調整）
-        scroll_area.setMinimumHeight(200)
-        scroll_area.setMaximumHeight(200)
+        scroll_area.setMinimumHeight(150)
+        scroll_area.setMaximumHeight(300)
         
         layout.addWidget(title_label)
         layout.addWidget(scroll_area)
@@ -931,7 +977,7 @@ class MainWindow(QMainWindow):
         super().__init__()
         self.setStyleSheet(COMMON_STYLES)
         self.setWindowTitle("Map and Waypoint Editor")  # ウィンドウタイトルを日本語に
-        self.setGeometry(100, 100, 1200, 800)
+        self.setGeometry(100, 100, 1200, 1000)
         
         # メインウィジェットとレイアウト
         main_widget = QWidget()
