@@ -531,9 +531,16 @@ class ImageViewer(QWidget):
         if not self.pgm_layer.pixmap:
             return
 
-        # クリック位置を直接使用（スケール変換を行わない）
-        x = pos.x()
-        y = pos.y()
+        # 表示サイズからピクセル座標に変換
+        pixmap_geometry = self.pgm_display.geometry()
+        if self.pgm_layer.pixmap:
+            scale_x = self.pgm_layer.pixmap.width() / pixmap_geometry.width()
+            scale_y = self.pgm_layer.pixmap.height() / pixmap_geometry.height()
+            x = int(pos.x() * scale_x)
+            y = int(pos.y() * scale_y)
+        else:
+            x = pos.x()
+            y = pos.y()
         
         waypoint = Waypoint(x, y)
         self.waypoints.append(waypoint)
@@ -541,7 +548,7 @@ class ImageViewer(QWidget):
         
         # ウェイポイントレイヤーの初期化（必要な場合）
         if not self.waypoint_layer.pixmap:
-            self.waypoint_layer.pixmap = QPixmap(self.pgm_display.size())
+            self.waypoint_layer.pixmap = QPixmap(self.pgm_layer.pixmap.size())
             self.waypoint_layer.pixmap.fill(Qt.GlobalColor.transparent)
         
         self.waypoint_added.emit(waypoint)
@@ -569,13 +576,10 @@ class ImageViewer(QWidget):
             painter.setOpacity(self.pgm_layer.opacity)
             painter.drawPixmap(0, 0, self.pgm_layer.pixmap)
 
-        # ウェイポイントの描画を更新
-        if self.waypoints:
-            # ウェイポイントレイヤーを更新
-            self.waypoint_layer.pixmap = QPixmap(result.size())
-            self.waypoint_layer.pixmap.fill(Qt.GlobalColor.transparent)
-            wp_painter = QPainter(self.waypoint_layer.pixmap)
-            wp_painter.setRenderHint(QPainter.RenderHint.Antialiasing)  # アンチエイリアスを有効化
+        # ウェイポイントの描画（Waypointレイヤーの表示状態とopacityを考慮）
+        if self.waypoints and self.waypoint_layer.visible:
+            painter.setOpacity(self.waypoint_layer.opacity)
+            painter.setRenderHint(QPainter.RenderHint.Antialiasing)
             
             for waypoint in self.waypoints:
                 x, y = waypoint.x, waypoint.y
@@ -583,13 +587,13 @@ class ImageViewer(QWidget):
                 
                 # 矢印の描画
                 pen = QPen(Qt.GlobalColor.red)
-                pen.setWidth(3)  # 線を太く
-                wp_painter.setPen(pen)
+                pen.setWidth(3)
+                painter.setPen(pen)
                 
                 angle_line_length = size * 3
                 end_x = x + int(angle_line_length * np.cos(waypoint.angle))
                 end_y = y + int(angle_line_length * np.sin(waypoint.angle))
-                wp_painter.drawLine(x, y, end_x, end_y)
+                painter.drawLine(x, y, end_x, end_y)
                 
                 # 矢印の先端
                 arrow_size = size // 2
@@ -602,32 +606,29 @@ class ImageViewer(QWidget):
                 arrow_x2 = end_x + int(arrow_size * np.cos(arrow_angle2))
                 arrow_y2 = end_y + int(arrow_size * np.sin(arrow_angle2))
                 
-                wp_painter.drawLine(end_x, end_y, arrow_x1, arrow_y1)
-                wp_painter.drawLine(end_x, end_y, arrow_x2, arrow_y2)
+                painter.drawLine(end_x, end_y, arrow_x1, arrow_y1)
+                painter.drawLine(end_x, end_y, arrow_x2, arrow_y2)
                 
                 # 番号を表示する円を描画
-                circle_radius = size
-                wp_painter.setPen(Qt.PenStyle.NoPen)
-                wp_painter.setBrush(Qt.GlobalColor.red)
-                wp_painter.drawEllipse(x - circle_radius, y - circle_radius, 
-                                     circle_radius * 2, circle_radius * 2)
+                painter.setPen(Qt.PenStyle.NoPen)
+                painter.setBrush(Qt.GlobalColor.red)
+                painter.drawEllipse(x - size, y - size, size * 2, size * 2)
                 
                 # 番号を描画
-                wp_painter.setPen(Qt.GlobalColor.white)
+                painter.setPen(Qt.GlobalColor.white)
                 font = self.font()
-                font.setPointSize(12)  # フォントサイズを大きく
-                wp_painter.setFont(font)
+                font.setPointSize(12)
+                painter.setFont(font)
                 number_text = str(waypoint.number)
-                font_metrics = wp_painter.fontMetrics()
+                font_metrics = painter.fontMetrics()
                 text_width = font_metrics.horizontalAdvance(number_text)
                 text_height = font_metrics.height()
                 text_x = x - text_width // 2
                 text_y = y + text_height // 3
-                wp_painter.drawText(text_x, text_y, number_text)
-            
-            wp_painter.end()
+                painter.drawText(text_x, text_y, number_text)
 
         # 残りのレイヤーを描画
+        painter.setOpacity(1.0)  # 不透明度をリセット
         for layer in self.layers[1:]:  # PGMレイヤー以外を描画
             if layer.visible and layer.pixmap:
                 painter.setOpacity(layer.opacity)
@@ -752,16 +753,15 @@ class MenuPanel(QWidget):
 
 # LayerControlウィジェットを追加
 class LayerControl(QWidget):
-    """個々のレイヤーコントロールを管理するウィジェット"""
     def __init__(self, layer, parent=None):
         super().__init__(parent)
         self.layer = layer
         self.setup_ui()
         
     def setup_ui(self):
-        """UIの初期化"""
         layout = QHBoxLayout(self)
         layout.setContentsMargins(5, 5, 5, 5)
+        layout.setSpacing(10)  # ウィジェット間のスペースを設定
         
         self.setStyleSheet("""
             QWidget {
@@ -769,22 +769,29 @@ class LayerControl(QWidget):
                 border-radius: 3px;
                 padding: 5px;
             }
+            QCheckBox {
+                min-width: 120px;  /* チェックボックスの最小幅を設定 */
+                max-width: 120px;  /* チェックボックスの最大幅を設定 */
+            }
+            QSlider {
+                min-width: 100px;  /* スライダーの最小幅を設定 */
+            }
         """)
         
         # チェックボックスの設定
-        self.visibility_cb = QCheckBox(self.layer.name)  # レイヤー名を表示
+        self.visibility_cb = QCheckBox(self.layer.name)
         self.visibility_cb.setChecked(self.layer.visible)
-        self.visibility_cb.stateChanged.connect(self._on_visibility_changed)  # シグナル接続を追加
+        self.visibility_cb.stateChanged.connect(self._on_visibility_changed)
         
         # 不透明度スライダーの設定
         self.opacity_slider = QSlider(Qt.Orientation.Horizontal)
         self.opacity_slider.setRange(0, 100)
         self.opacity_slider.setValue(int(self.layer.opacity * 100))
-        self.opacity_slider.valueChanged.connect(self._on_opacity_changed)  # シグナル接続を追加
+        self.opacity_slider.valueChanged.connect(self._on_opacity_changed)
         
         # レイアウトに追加
         layout.addWidget(self.visibility_cb)
-        layout.addWidget(self.opacity_slider)
+        layout.addWidget(self.opacity_slider, stretch=1)  # スライダーを伸縮可能に設定
 
     def _on_visibility_changed(self, state):
         """表示/非表示の切り替え"""
