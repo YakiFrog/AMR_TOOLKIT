@@ -3,9 +3,10 @@ import numpy as np
 from PySide6.QtWidgets import (QApplication, QMainWindow, QWidget, QVBoxLayout, 
                               QHBoxLayout, QMenuBar, QMenu, QLabel, QPushButton,
                               QFileDialog, QScrollArea, QSplitter, QGesture, 
-                              QPinchGesture, QSlider, QCheckBox)
-from PySide6.QtCore import Qt, QPoint, Signal, QEvent, QSize
-from PySide6.QtGui import QPixmap, QImage, QWheelEvent, QPainter, QPen, QCursor
+                              QPinchGesture, QSlider, QCheckBox, QFrame)
+from PySide6.QtCore import Qt, QPoint, Signal, QEvent, QSize, QMimeData
+from PySide6.QtGui import (QPixmap, QImage, QWheelEvent, QPainter, QPen, QCursor,
+                          QDrag)  # QDragをQtGuiからインポート
 from enum import Enum
 
 # 共通のスタイル定義
@@ -693,6 +694,33 @@ class ImageViewer(QWidget):
         self.waypoint_removed.emit(-1)  # 特別な値-1で全削除を通知
         self.update_display()
 
+    def reorder_waypoints(self, source_number, target_number):
+        """ウェイポイントの順序を変更"""
+        if not self.waypoints:
+            return
+            
+        # 対象のウェイポイントを見つける
+        source_wp = next((wp for wp in self.waypoints if wp.number == source_number), None)
+        if not source_wp:
+            return
+            
+        # リストから一時的に削除
+        self.waypoints.remove(source_wp)
+        
+        # 新しい位置に挿入
+        insert_index = next((i for i, wp in enumerate(self.waypoints) 
+                           if wp.number == target_number), len(self.waypoints))
+        self.waypoints.insert(insert_index, source_wp)
+        
+        # 番号を振り直し
+        Waypoint.reset_counter()
+        for wp in self.waypoints:
+            Waypoint.counter += 1
+            wp.renumber(Waypoint.counter)
+            self.waypoint_added.emit(wp)
+            
+        self.update_display()
+
 class MenuPanel(QWidget):
     """メニューパネル
     ファイル操作とズーム制御のUIを提供"""
@@ -842,6 +870,7 @@ class RightPanel(QWidget):
     """右側のパネル"""
     waypoint_delete_requested = Signal(int)  # 新しいシグナルを追加
     all_waypoints_delete_requested = Signal()  # 新しいシグナル
+    waypoint_reorder_requested = Signal(int, int)  # 順序変更シグナルを追加
     
     def __init__(self):
         super().__init__()
@@ -1062,18 +1091,44 @@ class RightPanel(QWidget):
             layer_control = LayerControl(layer, self)
             self.layer_list_layout.addWidget(layer_control)
 
+    def handle_waypoint_reorder(self, source_number, target_number):
+        """ウェイポイントの順序変更を処理"""
+        self.waypoint_reorder_requested.emit(source_number, target_number)
+
 class WaypointListItem(QWidget):
     """ウェイポイントリストの各アイテム用ウィジェット"""
     delete_clicked = Signal(int)
-
+    
     def __init__(self, waypoint):
         super().__init__()
         self.waypoint_number = waypoint.number
+        self.waypoint = waypoint
+        
+        # ドラッグ&ドロップを有効化
+        self.setAcceptDrops(True)
         
         # レイアウト設定
         layout = QHBoxLayout(self)
         layout.setContentsMargins(5, 2, 5, 2)
         layout.setSpacing(5)
+        
+        # ドラッグハンドル（三本線）を追加
+        drag_handle = QLabel("⋮")  # 縦三点リーダー
+        drag_handle.setStyleSheet("""
+            QLabel {
+                font-size: 20px;
+                color: #666;
+                padding: 0 5px;
+                margin-right: 5px;
+            }
+        """)
+        
+        # フレームを作成（ドラッグ時のハイライト用）
+        self.frame = QFrame()
+        self.frame.setFrameStyle(QFrame.Shape.NoFrame)
+        frame_layout = QHBoxLayout(self.frame)
+        frame_layout.setContentsMargins(0, 0, 0, 0)
+        frame_layout.setSpacing(5)
         
         # ラベル
         self.label = QLabel(waypoint.display_name)
@@ -1101,10 +1156,15 @@ class WaypointListItem(QWidget):
         """)
         delete_button.clicked.connect(lambda: self.delete_clicked.emit(self.waypoint_number))
         
-        layout.addWidget(self.label, stretch=1)
-        layout.addWidget(delete_button)
+        # フレームにウィジェットを追加
+        frame_layout.addWidget(self.label, stretch=1)
+        frame_layout.addWidget(delete_button)
         
-        # ボーダースタイル
+        # メインレイアウトにウィジェットを追加
+        layout.addWidget(drag_handle)
+        layout.addWidget(self.frame)
+        
+        # スタイル設定
         self.setStyleSheet("""
             WaypointListItem {
                 border-bottom: 1px solid #eee;
@@ -1118,6 +1178,62 @@ class WaypointListItem(QWidget):
     def update_label(self, text):
         """ラベルテキストを更新"""
         self.label.setText(text)
+
+    def mousePressEvent(self, event):
+        if event.button() == Qt.MouseButton.LeftButton:
+            drag = QDrag(self)
+            mime_data = QMimeData()
+            mime_data.setText(str(self.waypoint_number))
+            drag.setMimeData(mime_data)
+            drag.exec()
+        super().mousePressEvent(event)
+
+    def dragEnterEvent(self, event):
+        if event.mimeData().hasText():
+            event.accept()
+            # 青い下線を一重線で表示
+            self.setStyleSheet("""
+                WaypointListItem {
+                    border-bottom: 1px solid #2196F3;
+                    background-color: white;
+                }
+            """)
+        else:
+            event.ignore()
+
+    def dragLeaveEvent(self, event):
+        # スタイルを元に戻す
+        self.setStyleSheet("""
+            WaypointListItem {
+                border-bottom: 1px solid #eee;
+                background-color: white;
+            }
+            WaypointListItem:hover {
+                background-color: #f5f5f5;
+            }
+        """)
+        super().dragLeaveEvent(event)
+
+    def dropEvent(self, event):
+        source_number = int(event.mimeData().text())
+        target_number = self.waypoint_number
+        if source_number != target_number:
+            parent = self.parent()
+            while parent and not isinstance(parent, RightPanel):
+                parent = parent.parent()
+            if parent:
+                parent.handle_waypoint_reorder(source_number, target_number)
+        # スタイルを元に戻す
+        self.setStyleSheet("""
+            WaypointListItem {
+                border-bottom: 1px solid #eee;
+                background-color: white;
+            }
+            WaypointListItem:hover {
+                background-color: #f5f5f5;
+            }
+        """)
+        event.accept()
 
 class MainWindow(QMainWindow):
     """メインウィンドウ
@@ -1186,6 +1302,10 @@ class MainWindow(QMainWindow):
 
         # 全ウェイポイント削除時の処理を接続
         self.analysis_panel.all_waypoints_delete_requested.connect(self.image_viewer.remove_all_waypoints)
+
+        # ウェイポイントの順序変更時の処理を接続
+        self.analysis_panel.waypoint_reorder_requested.connect(
+            self.image_viewer.reorder_waypoints)
 
     def update_layer_panel(self):
         """レイヤーパネルの表示を更新"""
