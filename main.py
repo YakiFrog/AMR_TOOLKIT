@@ -231,9 +231,9 @@ class DrawableLabel(QLabel):
                 pos = event.pos()
                 self.last_pos = pos
                 self.parent_viewer.draw_line(pos, pos)  # 点を描画
-        elif event.button() == Qt.MouseButton.RightButton:
-            # 右クリックでウェイポイントを追加
-            self.waypoint_clicked.emit(event.pos())
+        # elif event.button() == Qt.MouseButton.RightButton:
+        #     # 右クリックでウェイポイントを追加
+        #     self.waypoint_clicked.emit(event.pos())
         else:
             super().mousePressEvent(event)
 
@@ -629,7 +629,8 @@ class ImageViewer(QWidget):
                 # 番号を描画
                 painter.setPen(Qt.GlobalColor.white)
                 font = self.font()
-                font.setPointSize(12)
+                font.setPointSize(19)
+                font.setBold(True)
                 painter.setFont(font)
                 number_text = str(waypoint.number)
                 font_metrics = painter.fontMetrics()
@@ -704,16 +705,32 @@ class ImageViewer(QWidget):
         if not source_wp:
             return
             
-        # リストから一時的に削除
-        self.waypoints.remove(source_wp)
+        # 現在のインデックスを取得
+        source_index = self.waypoints.index(source_wp)
+        target_index = next((i for i, wp in enumerate(self.waypoints) 
+                           if wp.number == target_number), -1)
         
-        # 新しい位置に挿入
-        insert_index = next((i for i, wp in enumerate(self.waypoints) 
-                           if wp.number == target_number), len(self.waypoints))
-        self.waypoints.insert(insert_index, source_wp)
+        if target_index == -1:
+            return
+            
+        # リストから削除して新しい位置に挿入
+        self.waypoints.pop(source_index)
+        
+        # ターゲットの位置に挿入
+        if source_index < target_index:
+            # 上から下にドラッグする場合
+            self.waypoints.insert(target_index, source_wp)
+        else:
+            # 下から上にドラッグする場合
+            self.waypoints.insert(target_index, source_wp)
         
         # 番号を振り直し
         Waypoint.reset_counter()
+        
+        # UIを更新するために一旦全てのウェイポイントを削除
+        self.waypoint_removed.emit(-1)
+        
+        # ウェイポイントを順番に振り直してUIを更新
         for wp in self.waypoints:
             Waypoint.counter += 1
             wp.renumber(Waypoint.counter)
@@ -1126,12 +1143,14 @@ class WaypointListItem(QWidget):
         # フレームを作成（ドラッグ時のハイライト用）
         self.frame = QFrame()
         self.frame.setFrameStyle(QFrame.Shape.NoFrame)
-        frame_layout = QHBoxLayout(self.frame)
+        frame_layout = QHBoxLayout(self.frame) 
         frame_layout.setContentsMargins(0, 0, 0, 0)
         frame_layout.setSpacing(5)
         
         # ラベル
         self.label = QLabel(waypoint.display_name)
+        self.label.setFocusPolicy(Qt.FocusPolicy.NoFocus) # フォーカスを無効化
+        self.label.setAttribute(Qt.WidgetAttribute.WA_TransparentForMouseEvents)
         self.label.setStyleSheet("""
             QLabel {
                 font-size: 14px;
@@ -1161,8 +1180,8 @@ class WaypointListItem(QWidget):
         frame_layout.addWidget(delete_button)
         
         # メインレイアウトにウィジェットを追加
-        layout.addWidget(drag_handle)
-        layout.addWidget(self.frame)
+        layout.addWidget(drag_handle) # ドラッグハンドルを先頭に追加
+        layout.addWidget(self.frame, stretch=1)
         
         # スタイル設定
         self.setStyleSheet("""
@@ -1189,27 +1208,27 @@ class WaypointListItem(QWidget):
         super().mousePressEvent(event)
 
     def dragEnterEvent(self, event):
-        if event.mimeData().hasText():
+        # ドラッグされたデータがテキストなら受け入れる
+        if event.mimeData().hasText() and event.source() != self:
             event.accept()
-            # 青い下線を一重線で表示
-            self.setStyleSheet("""
-                WaypointListItem {
-                    border-bottom: 1px solid #2196F3;
-                    background-color: white;
+            self.label.setStyleSheet("""
+                QLabel {
+                    font-size: 14px;
+                    font-weight: 500;
+                    color: #2196F3;
                 }
             """)
         else:
             event.ignore()
 
     def dragLeaveEvent(self, event):
-        # スタイルを元に戻す
-        self.setStyleSheet("""
-            WaypointListItem {
-                border-bottom: 1px solid #eee;
-                background-color: white;
-            }
-            WaypointListItem:hover {
-                background-color: #f5f5f5;
+        # ドラッグが離れたら下線を消す
+        # self.frame.setFrameStyle(QFrame.Shape.NoFrame)
+        # self.frame.setStyleSheet("")
+        self.label.setStyleSheet("""
+            QLabel {
+                font-size: 14px;
+                font-weight: 500;
             }
         """)
         super().dragLeaveEvent(event)
@@ -1217,20 +1236,21 @@ class WaypointListItem(QWidget):
     def dropEvent(self, event):
         source_number = int(event.mimeData().text())
         target_number = self.waypoint_number
+        
+        # 同じ項目へのドロップは無視
         if source_number != target_number:
             parent = self.parent()
             while parent and not isinstance(parent, RightPanel):
                 parent = parent.parent()
             if parent:
+                # ドロップ位置に基づいて順序を変更
                 parent.handle_waypoint_reorder(source_number, target_number)
+        
         # スタイルを元に戻す
-        self.setStyleSheet("""
-            WaypointListItem {
-                border-bottom: 1px solid #eee;
-                background-color: white;
-            }
-            WaypointListItem:hover {
-                background-color: #f5f5f5;
+        self.label.setStyleSheet("""
+            QLabel {
+                font-size: 14px;
+                font-weight: 500;
             }
         """)
         event.accept()
