@@ -345,10 +345,11 @@ class ImageViewer(QWidget):
         # 基本レイヤーの作成とシグナル接続
         self.pgm_layer = Layer("PGM Layer")
         self.drawing_layer = Layer("Drawing Layer")
-        self.waypoint_layer = Layer("Waypoint Layer")  # ウェイポイントレイヤーを追加
-        self.origin_layer = Layer("Origin Layer")  # originレイヤーを追加
-        self.path_layer = Layer("Path Layer")  # パスレイヤーを追加
-        self.layers = [self.pgm_layer, self.path_layer, self.waypoint_layer, self.drawing_layer, self.origin_layer]  # 順序を変更
+        self.waypoint_layer = Layer("Waypoint Layer")  # ウェイポイントレイヤー
+        self.origin_layer = Layer("Origin Layer")  # originレイヤー
+        self.path_layer = Layer("Path Layer")  # パスレイヤー
+        # レイヤーの順序を変更（下から上の順）: PGM -> Drawing -> Path -> Waypoint -> Origin
+        self.layers = [self.pgm_layer, self.drawing_layer, self.path_layer, self.waypoint_layer, self.origin_layer]
         self.active_layer = self.drawing_layer
         
         # レイヤーの変更通知を接続
@@ -672,7 +673,7 @@ class ImageViewer(QWidget):
                 size = self.waypoint_size
                 
                 # 矢印の描画（透明度を調整）
-                pen = QPen(QColor(255, 0, 0, 180))  # 赤色で透明度を設定
+                pen = QPen(QColor(255, 0, 0, 255))  # 赤色で透明度を設定
                 pen.setWidth(3)
                 painter.setPen(pen)
                 
@@ -696,7 +697,7 @@ class ImageViewer(QWidget):
                 
                 # 円を描画（透明度を調整）
                 painter.setPen(Qt.PenStyle.NoPen)
-                painter.setBrush(QColor(255, 0, 0, 180))  # 赤色で透明度を設定
+                painter.setBrush(QColor(255, 0, 0, 255))  # 赤色で透明度を設定
                 painter.drawEllipse(x - size, y - size, size * 2, size * 2)
                 
                 # 番号を描画
@@ -927,7 +928,7 @@ class ImageViewer(QWidget):
                 painter.setRenderHint(QPainter.RenderHint.Antialiasing)
                 
                 # パスのスタイル設定
-                pen = QPen(Qt.GlobalColor.blue, 3)  # 青色、太さ3
+                pen = QPen(Qt.GlobalColor.green, 3)  # 青色、太さ3
                 pen.setStyle(Qt.PenStyle.SolidLine)
                 painter.setPen(pen)
                 
