@@ -251,9 +251,9 @@ class DrawableLabel(QLabel):
         if self.drawing_enabled and self.parent_viewer:
             if self.is_setting_angle and self.parent_viewer.drawing_mode == DrawingMode.WAYPOINT:
                 if self.temp_waypoint and self.click_pos:
-                    # プレビュー用の角度計算（一時的な表示用）
+                    # プレビュー用の角度計算（Y軸を反転）
                     dx = event.pos().x() - self.click_pos.x()
-                    dy = event.pos().y() - self.click_pos.y()
+                    dy = -(event.pos().y() - self.click_pos.y())  # Y軸を反転
                     angle = np.arctan2(dy, dx)
                     self.temp_waypoint.set_angle(angle)
                     self.waypoint_updated.emit(self.temp_waypoint)
@@ -268,9 +268,9 @@ class DrawableLabel(QLabel):
     def mouseReleaseEvent(self, event):
         if self.drawing_enabled:
             if self.is_setting_angle and self.click_pos:
-                # マウスボタンを離した位置で最終的な角度を計算
+                # 最終的な角度計算（Y軸を反転）
                 dx = event.pos().x() - self.click_pos.x()
-                dy = event.pos().y() - self.click_pos.y()
+                dy = -(event.pos().y() - self.click_pos.y())  # Y軸を反転
                 if self.temp_waypoint:
                     final_angle = np.arctan2(dy, dx)
                     self.temp_waypoint.set_angle(final_angle)
@@ -676,20 +676,21 @@ class ImageViewer(QWidget):
                 painter.setPen(pen)
                 
                 angle_line_length = size * 3
+                # 矢印の方向を修正（Y軸を反転）
                 end_x = x + int(angle_line_length * np.cos(waypoint.angle))
-                end_y = y + int(angle_line_length * np.sin(waypoint.angle))
+                end_y = y - int(angle_line_length * np.sin(waypoint.angle))  # マイナスに変更
                 painter.drawLine(x, y, end_x, end_y)
                 
-                # 矢印の先端
+                # 矢印の先端の角度を修正
                 arrow_size = size // 2
-                angle = waypoint.angle
-                arrow_angle1 = angle + np.pi * 3/4
-                arrow_angle2 = angle - np.pi * 3/4
+                arrow_angle1 = waypoint.angle + np.pi * 3/4
+                arrow_angle2 = waypoint.angle - np.pi * 3/4
                 
+                # 矢印の先端の座標計算も修正（Y軸を反転）
                 arrow_x1 = end_x + int(arrow_size * np.cos(arrow_angle1))
-                arrow_y1 = end_y + int(arrow_size * np.sin(arrow_angle1))
+                arrow_y1 = end_y - int(arrow_size * np.sin(arrow_angle1))  # マイナスに変更
                 arrow_x2 = end_x + int(arrow_size * np.cos(arrow_angle2))
-                arrow_y2 = end_y + int(arrow_size * np.sin(arrow_angle2))
+                arrow_y2 = end_y - int(arrow_size * np.sin(arrow_angle2))  # マイナスに変更
                 
                 painter.drawLine(end_x, end_y, arrow_x1, arrow_y1)
                 painter.drawLine(end_x, end_y, arrow_x2, arrow_y2)
