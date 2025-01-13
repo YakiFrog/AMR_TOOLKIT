@@ -1,5 +1,6 @@
 import sys
 import numpy as np
+import yaml  # PyYAMLをインポート
 from PySide6.QtWidgets import (QApplication, QMainWindow, QWidget, QVBoxLayout, 
                               QHBoxLayout, QMenuBar, QMenu, QLabel, QPushButton,
                               QFileDialog, QScrollArea, QSplitter, QGesture, 
@@ -40,12 +41,16 @@ class Waypoint:
     """ウェイポイントを管理するクラス"""
     counter = 0
     
-    def __init__(self, x, y, angle=0, name=None):
+    def __init__(self, pixel_x, pixel_y, angle=0, name=None):
         Waypoint.counter += 1
         self.number = Waypoint.counter
-        self.x = x
-        self.y = y
-        self.angle = angle  # 角度を追加（ラジアン）
+        # ピクセル座標
+        self.pixel_x = pixel_x
+        self.pixel_y = pixel_y
+        # メートル座標（初期値は0）
+        self.x = 0
+        self.y = 0
+        self.angle = angle
         self.name = name if name else f"Waypoint {self.number}"
         self.update_display_name()
 
@@ -57,16 +62,17 @@ class Waypoint:
     def update_display_name(self):
         """表示名を更新"""
         degrees = int(self.angle * 180 / np.pi)  # ラジアンを度に変換
-        self.display_name = f"#{self.number:02d} ({self.x}, {self.y}) {degrees}°"
+        self.display_name = f"#{self.number:02d} ({self.x:.2f}, {self.y:.2f}) {degrees}°"
 
-    @classmethod
-    def reset_counter(cls):
-        """カウンターをリセット"""
-        cls.counter = 0
+    def update_metric_coordinates(self, origin_x, origin_y, resolution):
+        """ピクセル座標からメートル座標を計算"""
+        # 原点からの相対位置をピクセルで計算
+        rel_x = self.pixel_x - origin_x
+        rel_y = origin_y - self.pixel_y  # y軸は反転
 
-    def renumber(self, new_number):
-        """ウェイポイントの番号を振り直し"""
-        self.number = new_number
+        # メートル単位に変換
+        self.x = rel_x * resolution
+        self.y = rel_y * resolution
         self.update_display_name()
 
 class CustomScrollArea(QScrollArea):
@@ -323,9 +329,11 @@ class ImageViewer(QWidget):
                 background-color: rgba(255, 255, 255, 0.8);
                 border: 1px solid #ccc;
                 border-radius: 3px;
-                padding: 3px 8px;
+                padding: 3px 5px; 
                 font-size: 12px;
                 font-family: monospace;
+                min-height: 40px;
+                min-width: 150px;
             }
         """)
         self.coord_label.setAlignment(Qt.AlignmentFlag.AlignCenter)
@@ -338,7 +346,8 @@ class ImageViewer(QWidget):
         self.pgm_layer = Layer("PGM Layer")
         self.drawing_layer = Layer("Drawing Layer")
         self.waypoint_layer = Layer("Waypoint Layer")  # ウェイポイントレイヤーを追加
-        self.layers = [self.pgm_layer, self.waypoint_layer, self.drawing_layer]  # 順序を変更
+        self.origin_layer = Layer("Origin Layer")  # originレイヤーを追加
+        self.layers = [self.pgm_layer, self.waypoint_layer, self.drawing_layer, self.origin_layer]  # 順序を変更
         self.active_layer = self.drawing_layer
         
         # レイヤーの変更通知を接続
@@ -350,6 +359,9 @@ class ImageViewer(QWidget):
 
         self.show_grid = False  # グリッド表示フラグを追加
         self.grid_size = 50     # グリッドサイズ（ピクセル単位）
+
+        self.origin_point = None  # origin点の座標を保存
+        self.resolution = 0.05  # デフォルトの解像度（m/pixel）
 
         self.setup_display()
         self.setup_scroll_area()
@@ -385,10 +397,10 @@ class ImageViewer(QWidget):
         original_resize_event = self.scroll_area.resizeEvent
         def new_resize_event(event):
             original_resize_event(event)
-            # 座標ラベルを右上に配置
+            # 座標ラベルを右上に配置（右端から30ピクセル離す）
             label_width = 150
-            label_height = 25
-            new_x = self.scroll_area.viewport().width() - label_width - 10
+            label_height = 40  # min-heightに合わせて調整
+            new_x = self.scroll_area.viewport().width() - label_width - 30  # 30ピクセル左に移動
             new_y = 10  # 上端から10ピクセルの位置
             self.coord_label.setGeometry(new_x, new_y, label_width, label_height)
             self.coord_label.raise_()  # ラベルを最前面に表示
@@ -595,6 +607,12 @@ class ImageViewer(QWidget):
             y = pos.y()
         
         waypoint = Waypoint(x, y)
+        
+        # 原点が設定されている場合は、メートル座標を計算
+        if self.origin_point:
+            origin_x, origin_y = self.origin_point
+            waypoint.update_metric_coordinates(origin_x, origin_y, self.resolution)
+            
         self.waypoints.append(waypoint)
         self.pgm_display.temp_waypoint = waypoint
         
@@ -649,7 +667,7 @@ class ImageViewer(QWidget):
             painter.setRenderHint(QPainter.RenderHint.Antialiasing)
             
             for waypoint in self.waypoints:
-                x, y = waypoint.x, waypoint.y
+                x, y = waypoint.pixel_x, waypoint.pixel_y
                 size = self.waypoint_size
                 
                 # 矢印の描画
@@ -800,7 +818,7 @@ class ImageViewer(QWidget):
 
     def update_mouse_position(self, pos):
         """マウス位置の更新とラベル表示"""
-        if not self.pgm_layer.pixmap:
+        if not self.pgm_layer.pixmap or not self.origin_point:
             return
 
         # 表示座標からピクセル座標に変換
@@ -810,10 +828,85 @@ class ImageViewer(QWidget):
         
         pixel_x = int(pos.x() * scale_x)
         pixel_y = int(pos.y() * scale_y)
+
+        # 原点からの相対位置を計算
+        origin_x, origin_y = self.origin_point
+        rel_x = (pixel_x - origin_x) * self.resolution
+        rel_y = (origin_y - pixel_y) * self.resolution  # y軸は反転
         
-        # 座標を表示
-        self.coord_label.setText(f"X: {pixel_x}, Y: {pixel_y}")
+        # 座標を表示（ピクセル座標と相対座標）
+        self.coord_label.setText(f"Pixel: ({pixel_x}, {pixel_y})\nMetric: ({rel_x:.2f}, {rel_y:.2f})")
         self.coord_label.show()
+
+    def load_yaml_file(self, file_path):
+        """YAMLファイルを読み込みorigin点を設定"""
+        try:
+            with open(file_path, 'r') as f:
+                yaml_data = yaml.safe_load(f)
+                
+            # YAMLファイルから直接originとresolutionを読み取る
+            if 'origin' in yaml_data:
+                origin = yaml_data['origin']
+                if len(origin) >= 2:
+                    # 解像度を保存
+                    self.resolution = float(yaml_data.get('resolution', 0.05))
+                    x_pixel = int(-origin[0] / self.resolution)
+                    y_pixel = int(-origin[1] / self.resolution)
+                    
+                    if self.pgm_layer.pixmap:
+                        height = self.pgm_layer.pixmap.height()
+                        y_pixel = height - y_pixel
+                    
+                    self.origin_point = (x_pixel, y_pixel)
+                    self.draw_origin_point()
+                    
+                    # 既存のウェイポイントの座標を更新
+                    self.update_all_waypoint_coordinates()
+                    print(f"Origin point set to: {self.origin_point} (resolution: {self.resolution})")
+                    print(f"Original coordinates: x={origin[0]}, y={origin[1]} meters")
+                
+        except Exception as e:
+            print(f"Error loading YAML file: {str(e)}")
+            import traceback
+            traceback.print_exc()
+
+    def update_all_waypoint_coordinates(self):
+        """全てのウェイポイントの座標を更新"""
+        if not self.origin_point:
+            return
+            
+        origin_x, origin_y = self.origin_point
+        for waypoint in self.waypoints:
+            waypoint.update_metric_coordinates(origin_x, origin_y, self.resolution)
+            self.waypoint_added.emit(waypoint)  # UIを更新
+
+    def draw_origin_point(self):
+        """origin点を描画"""
+        if not self.origin_point or not self.pgm_layer.pixmap:
+            return
+
+        # originレイヤーのピクスマップを初期化
+        self.origin_layer.pixmap = QPixmap(self.pgm_layer.pixmap.size())
+        self.origin_layer.pixmap.fill(Qt.GlobalColor.transparent)
+
+        painter = QPainter(self.origin_layer.pixmap)
+        painter.setRenderHint(QPainter.RenderHint.Antialiasing)
+
+        # 十字マークを描画
+        x, y = self.origin_point
+        size = 20  # マーカーのサイズ
+        
+        # 赤い十字を描画
+        pen = QPen(Qt.GlobalColor.red, 3)
+        painter.setPen(pen)
+        painter.drawLine(x - size, y, x + size, y)  # 水平線
+        painter.drawLine(x, y - size, x, y + size)  # 垂直線
+        
+        # 円を描画
+        painter.drawEllipse(x - size/2, y - size/2, size, size)
+        
+        painter.end()
+        self.update_display()
 
 class MenuPanel(QWidget):
     """メニューパネル
@@ -822,6 +915,7 @@ class MenuPanel(QWidget):
     # シグナルの定義
     file_selected = Signal(str)  # ファイル選択時のシグナル
     zoom_value_changed = Signal(int)  # ズーム値変更時のシグナル
+    yaml_selected = Signal(str)  # YAMLファイル選択用のシグナルを追加
     
     def __init__(self, parent=None):
         super().__init__(parent)
@@ -851,10 +945,16 @@ class MenuPanel(QWidget):
         file_layout = QHBoxLayout()
         self.select_button = QPushButton("Select PGM File")
         self.select_button.clicked.connect(self.open_file_dialog)
+        
+        # YAMLファイル選択ボタンを追加
+        self.yaml_button = QPushButton("Select YAML File")
+        self.yaml_button.clicked.connect(self.open_yaml_dialog)
+        
         self.file_name_label = QLabel("No file selected")  # ファイル名表示用ラベル
         self.file_name_label.setStyleSheet("color: #666; padding: 0 10px;")
         
         file_layout.addWidget(self.select_button)
+        file_layout.addWidget(self.yaml_button)  # YAMLボタンを追加
         file_layout.addWidget(self.file_name_label, stretch=1)  # stretchを1に設定して余白を埋める
         
         # ズームコントロールをメソッドに分離
@@ -927,6 +1027,17 @@ class MenuPanel(QWidget):
             # ファイルのベース名（パスを除いた部分）を表示
             self.file_name_label.setText(file_name.split('/')[-1])
             self.file_selected.emit(file_name)
+
+    def open_yaml_dialog(self):
+        """YAMLファイル選択ダイアログを開く"""
+        file_name, _ = QFileDialog.getOpenFileName(
+            self,
+            "Open YAML File",
+            "",
+            "YAML Files (*.yaml *.yml);;All Files (*)"
+        )
+        if file_name:
+            self.yaml_selected.emit(file_name)
 
 # LayerControlウィジェットを追加
 class LayerControl(QWidget):
@@ -1386,6 +1497,9 @@ class MainWindow(QMainWindow):
         # グリッドボタンのシグナルを接続
         self.menu_panel.grid_button.clicked.connect(self.image_viewer.toggle_grid)
 
+        # YAMLファイル選択時の処理を接続
+        self.menu_panel.yaml_selected.connect(self.load_yaml_file)
+
         # 左側レイアウトの構成
         left_layout.addWidget(self.menu_panel)
         left_layout.addWidget(self.image_viewer)
@@ -1479,6 +1593,10 @@ class MainWindow(QMainWindow):
         # ズーム率表示を更新
         zoom_percent = int(scale_factor * 100)
         self.menu_panel.zoom_label.setText(f"{zoom_percent}%")
+
+    def load_yaml_file(self, file_path):
+        """YAMLファイルの読み込みをImageViewerに委譲"""
+        self.image_viewer.load_yaml_file(file_path)
 
 def main():
     """アプリケーションのメインエントリーポイント"""
