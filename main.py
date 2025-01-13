@@ -431,8 +431,14 @@ class ImageViewer(QWidget):
         self.pen_size = 2       # デフォルトのペンサイズ
         self.eraser_size = 10   # デフォルトの消しゴムサイズ
         
-        # 座標表示用ラベルを最初に初期化（この1箇所だけにする）
-        self.coord_label = QLabel()
+        # スクロールエリアを最初に初期化
+        self.scroll_area = CustomScrollArea()
+        self.scroll_area.setWidgetResizable(True)
+        self.scroll_area.setMinimumSize(600, 400)
+        self.scroll_area.setStyleSheet("QScrollArea { border: 2px solid #ccc; background-color: white; }")
+
+        # 座標表示用ラベルを初期化
+        self.coord_label = QLabel(self.scroll_area.viewport())
         self.coord_label.setStyleSheet("""
             QLabel {
                 background-color: rgba(255, 255, 255, 0.8);
@@ -446,71 +452,69 @@ class ImageViewer(QWidget):
             }
         """)
         self.coord_label.setAlignment(Qt.AlignmentFlag.AlignCenter)
-        
-        # レイヤー管理
+        self.coord_label.hide()
+
+        # レイヤー管理の初期化
         self.layers = []
         self.active_layer = None
         
         # 基本レイヤーの作成とシグナル接続
         self.pgm_layer = Layer("PGM Layer")
         self.drawing_layer = Layer("Drawing Layer")
-        self.waypoint_layer = Layer("Waypoint Layer")  # ウェイポイントレイヤー
-        self.origin_layer = Layer("Origin Layer")  # originレイヤー
-        self.path_layer = Layer("Path Layer")  # パスレイヤー
-        # レイヤーの順序を変更（下から上の順）: PGM -> Drawing -> Path -> Waypoint -> Origin
-        self.layers = [self.pgm_layer, self.drawing_layer, self.path_layer, self.waypoint_layer, self.origin_layer]
+        self.waypoint_layer = Layer("Waypoint Layer")
+        self.origin_layer = Layer("Origin Layer")
+        self.path_layer = Layer("Path Layer")
+        self.layers = [self.pgm_layer, self.drawing_layer, self.path_layer, 
+                      self.waypoint_layer, self.origin_layer]
         self.active_layer = self.drawing_layer
         
-        # レイヤーの変更通知を接続
         for layer in self.layers:
             layer.changed.connect(self.on_layer_changed)
         
-        self.waypoints = []  # ウェイポイントのリスト
-        self.waypoint_size = 15  # ウェイポイントのサイズを大きく
+        self.waypoints = []
+        self.waypoint_size = 15
+        self.show_grid = False
+        self.grid_size = 50
+        self.origin_point = None
+        self.resolution = 0.05
 
-        self.show_grid = False  # グリッド表示フラグを追加
-        self.grid_size = 50     # グリッドサイズ（ピクセル単位）
-
-        self.origin_point = None  # origin点の座標を保存
-        self.resolution = 0.05  # デフォルトの解像度（m/pixel）
-
+        # 各コンポーネントの設定
         self.setup_display()
         self.setup_scroll_area()
         self.setup_drawing_tools()
 
-        # ステータスメッセージ用のラベルを追加
-        self.status_label = QLabel()
-        self.status_label.setStyleSheet("""
-            QLabel {
-                background-color: rgba(0, 0, 0, 0.7);
-                color: white;
-                padding: 8px;
-                border-radius: 4px;
-                font-size: 12px;
-            }
-        """)
-        self.status_label.hide()
-
         # シグナルを接続
         self.pgm_display.waypoint_edited.connect(self.handle_waypoint_edited)
+        self.scroll_area.scale_changed.connect(self.handle_scale_change)
 
     def setup_display(self):
         """画像表示用ラベルの設定を集約"""
         self.pgm_display = DrawableLabel()
-        self.pgm_display.parent_viewer = self  # 親ビューアへの参照を設定
+        self.pgm_display.parent_viewer = self
         self.pgm_display.setAlignment(Qt.AlignmentFlag.AlignCenter)
         self.pgm_display.setStyleSheet("background-color: white;")
         self.pgm_display.waypoint_clicked.connect(self.add_waypoint)
         self.pgm_display.waypoint_updated.connect(self.update_waypoint)
         self.pgm_display.mouse_position_changed.connect(self.update_mouse_position)
 
+        # ステータスメッセージ用のラベルを設定
+        self.status_label = QLabel(self.scroll_area.viewport())
+        self.status_label.setStyleSheet("""
+            QLabel {
+                background-color: rgba(0, 0, 0, 0.7);
+                color: white;
+                padding: 8px 16px;
+                border-radius: 4px;
+                font-size: 12px;
+            }
+        """)
+        self.status_label.hide()
+
+        # スクロールエリアにpgm_displayを設定
+        self.scroll_area.setWidget(self.pgm_display)
+
     def setup_scroll_area(self):
         """スクロールエリアの設定を集約"""
-        self.scroll_area = CustomScrollArea()
-        self.scroll_area.setWidget(self.pgm_display)
-        self.scroll_area.setWidgetResizable(True)
-        self.scroll_area.setMinimumSize(600, 400)
-        self.scroll_area.setStyleSheet("QScrollArea { border: 2px solid #ccc; background-color: white; }")
         self.scroll_area.scale_changed.connect(self.handle_scale_change)
 
         self.setLayout(QVBoxLayout())
@@ -530,10 +534,8 @@ class ImageViewer(QWidget):
                 padding: 8px;
                 border-radius: 4px;
                 font-size: 12px;
-                text-align: center;
             }
         """)
-        self.status_label.setAlignment(Qt.AlignmentFlag.AlignCenter)
         self.status_label.hide()
 
         # スクロールエリアのリサイズイベントをオーバーライド
@@ -560,8 +562,19 @@ class ImageViewer(QWidget):
 
     def show_edit_message(self, message):
         """編集時のヘルプメッセージを表示"""
+        # メッセージの表示位置を調整（ビューアーの中央下）
         self.status_label.setText(message)
+        self.status_label.adjustSize()
+        
+        # スクロールエリアのビューポート内での位置を計算
+        viewport = self.scroll_area.viewport()
+        x = (viewport.width() - self.status_label.width()) // 2
+        y = viewport.height() - self.status_label.height() - 20  # 下端から20ピクセル上
+        
+        self.status_label.move(x, y)
         self.status_label.show()
+        self.status_label.raise_()  # 最前面に表示
+        
         # 3秒後にメッセージを非表示
         QTimer.singleShot(3000, self.status_label.hide)
 
@@ -886,7 +899,7 @@ class ImageViewer(QWidget):
         # 残りのレイヤーを描画
         painter.setOpacity(1.0)  # 不透明度をリセット
         for layer in self.layers[1:]:  # PGMレイヤー以外を描画
-            if layer.visible and layer.pixmap:
+            if (layer.visible and layer.pixmap):
                 painter.setOpacity(layer.opacity)
                 painter.drawPixmap(0, 0, layer.pixmap)
         
