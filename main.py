@@ -132,7 +132,7 @@ class CustomScrollArea(QScrollArea):
             # 通常モード時は既存のスクロール処理
             if event.button() == Qt.MouseButton.LeftButton:
                 self.mouse_pressed = True
-                self.last_pos = event.pos()
+                self.last_pos = event.position().toPoint()  # 修正
                 self.setCursor(Qt.CursorShape.ClosedHandCursor)
                 event.accept()
             else:
@@ -156,12 +156,12 @@ class CustomScrollArea(QScrollArea):
             event.ignore()
         else:
             if self.mouse_pressed and self.last_pos:
-                delta = event.pos() - self.last_pos
+                delta = event.position().toPoint() - self.last_pos  # 修正
                 self.horizontalScrollBar().setValue(
                     self.horizontalScrollBar().value() - delta.x())
                 self.verticalScrollBar().setValue(
                     self.verticalScrollBar().value() - delta.y())
-                self.last_pos = event.pos()
+                self.last_pos = event.position().toPoint()  # 修正
                 event.accept()
             else:
                 super().mouseMoveEvent(event)
@@ -262,7 +262,7 @@ class DrawableLabel(QLabel):
         if not self.parent_viewer:
             return
             
-        pos = event.pos()
+        pos = event.position().toPoint()  # 修正
         pixmap_geometry = self.geometry()
         if self.parent_viewer.drawing_layer.pixmap:
             scale_x = self.parent_viewer.drawing_layer.pixmap.width() / pixmap_geometry.width()
@@ -303,7 +303,7 @@ class DrawableLabel(QLabel):
                 self.last_pos = pos
                 self.parent_viewer.draw_line(pos, pos)  # 点を描画
         elif self.edit_mode and self.editing_waypoint:
-            pos = event.pos()
+            pos = event.position().toPoint()  # 修正
             pixmap_geometry = self.geometry()
             if self.parent_viewer.drawing_layer.pixmap:
                 scale_x = self.parent_viewer.drawing_layer.pixmap.width() / pixmap_geometry.width()
@@ -326,7 +326,7 @@ class DrawableLabel(QLabel):
 
     def mouseMoveEvent(self, event):
         # マウス位置を通知
-        pos = event.position().toPoint()
+        pos = event.position().toPoint()  # 修正
         self.mouse_position_changed.emit(pos)
         # 既存の処理を継続
         if self.drawing_enabled and self.parent_viewer:
@@ -343,7 +343,7 @@ class DrawableLabel(QLabel):
                 self.last_pos = pos
                 self.updateCursor()  # マウス移動時にカーソルを更新
         elif self.edit_mode and self.editing_waypoint:
-            pos = event.pos()
+            pos = event.position().toPoint()  # 修正
             pixmap_geometry = self.geometry()
             if self.parent_viewer.drawing_layer.pixmap:
                 scale_x = self.parent_viewer.drawing_layer.pixmap.width() / pixmap_geometry.width()
@@ -371,8 +371,9 @@ class DrawableLabel(QLabel):
         if self.drawing_enabled:
             if self.is_setting_angle and self.click_pos:
                 # 最終的な角度計算（Y軸を反転）
-                dx = event.pos().x() - self.click_pos.x()
-                dy = -(event.pos().y() - self.click_pos.y())  # Y軸を反転
+                current_pos = event.position().toPoint()  # 修正
+                dx = current_pos.x() - self.click_pos.x()
+                dy = -(current_pos.y() - self.click_pos.y())  # Y軸を反転
                 if self.temp_waypoint:
                     final_angle = np.arctan2(dy, dx)
                     self.temp_waypoint.set_angle(final_angle)
@@ -519,6 +520,22 @@ class ImageViewer(QWidget):
         self.coord_label.setParent(self.scroll_area.viewport())
         self.coord_label.hide()  # 初期状態では非表示
 
+        # ステータスメッセージ用のラベルをスクロールエリアのビューポートの子として設定
+        self.status_label = QLabel()
+        self.status_label.setParent(self.scroll_area.viewport())
+        self.status_label.setStyleSheet("""
+            QLabel {
+                background-color: rgba(0, 0, 0, 0.7);
+                color: white;
+                padding: 8px;
+                border-radius: 4px;
+                font-size: 12px;
+                text-align: center;
+            }
+        """)
+        self.status_label.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        self.status_label.hide()
+
         # スクロールエリアのリサイズイベントをオーバーライド
         original_resize_event = self.scroll_area.resizeEvent
         def new_resize_event(event):
@@ -530,11 +547,12 @@ class ImageViewer(QWidget):
             new_y = 10  # 上端から10ピクセルの位置
             self.coord_label.setGeometry(new_x, new_y, label_width, label_height)
             
-            # ステータスメッセージを中央上部に配置
+            # ステータスメッセージを下部中央に配置
             status_width = 300
             status_height = 30
             status_x = (self.scroll_area.viewport().width() - status_width) // 2
-            self.status_label.setGeometry(status_x, 10, status_width, status_height)
+            status_y = self.scroll_area.viewport().height() - status_height - 10  # 下部に10ピクセルのマージン
+            self.status_label.setGeometry(status_x, status_y, status_width, status_height)
             
             self.coord_label.raise_()
             self.status_label.raise_()
@@ -676,16 +694,17 @@ class ImageViewer(QWidget):
 
     def mousePressEvent(self, event):
         if self.drawing_mode != DrawingMode.NONE:
-            self.last_point = event.pos()
-            self.draw_line(event.pos(), event.pos())
+            self.last_point = event.position().toPoint()  # 修正
+            self.draw_line(event.position().toPoint(), event.position().toPoint())  # 修正
             event.accept()
         else:
             super().mousePressEvent(event)
 
     def mouseMoveEvent(self, event):
         if self.drawing_mode != DrawingMode.NONE and self.last_point:
-            self.draw_line(self.last_point, event.pos())
-            self.last_point = event.pos()
+            current_pos = event.position().toPoint()  # 修正
+            self.draw_line(self.last_point, current_pos)
+            self.last_point = current_pos
             event.accept()
         else:
             super().mouseMoveEvent(event)
@@ -1616,32 +1635,7 @@ class WaypointListItem(QWidget):
         """)
         delete_button.clicked.connect(lambda: self.delete_clicked.emit(self.waypoint_number))
         
-        # 編集ボタンを追加
-        edit_button = QPushButton("✎")
-        edit_button.setFixedSize(20, 20)
-        edit_button.setStyleSheet("""
-            QPushButton {
-                background-color: #4CAF50;
-                color: white;
-                border-radius: 10px;
-                font-weight: bold;
-                font-size: 12px;
-            }
-            QPushButton:hover {
-                background-color: #45a049;
-            }
-            QPushButton:checked {
-                background-color: #357a38;
-            }
-        """)
-        edit_button.setCheckable(True)
-        edit_button.clicked.connect(self.toggle_edit_mode)
-        
-        # フレームにウィジェットを追加（編集ボタンを追加）
-        frame_layout.addWidget(edit_button)
-        frame_layout.addWidget(delete_button)
-
-        # フレームにウィジェットを追加
+        # フレームにウィジェットを追加（編集ボタンを削除）
         frame_layout.addWidget(self.label, stretch=1)
         frame_layout.addWidget(delete_button)
         
@@ -1726,17 +1720,6 @@ class WaypointListItem(QWidget):
             }
         """)
         event.accept()
-
-    def toggle_edit_mode(self):
-        parent = self.parent()
-        while parent and not isinstance(parent, ImageViewer):
-            parent = parent.parent()
-        if parent:
-            button = self.sender()
-            if button.isChecked():
-                parent.enter_edit_mode(self.waypoint)
-            else:
-                parent.exit_edit_mode()
 
 class MainWindow(QMainWindow):
     """メインウィンドウ
@@ -1923,4 +1906,3 @@ def main():
 
 if __name__ == '__main__':
     main()
-
