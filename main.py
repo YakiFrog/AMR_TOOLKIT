@@ -42,6 +42,11 @@ class Waypoint:
     """ウェイポイントを管理するクラス"""
     counter = 0
     
+    @classmethod
+    def reset_counter(cls):
+        """カウンターをリセット"""
+        cls.counter = 0
+    
     def __init__(self, pixel_x, pixel_y, angle=0, name=None):
         Waypoint.counter += 1
         self.number = Waypoint.counter
@@ -74,6 +79,12 @@ class Waypoint:
         # メートル単位に変換
         self.x = rel_x * resolution
         self.y = rel_y * resolution
+        self.update_display_name()
+
+    def renumber(self, new_number):
+        """ウェイポイントの番号を変更"""
+        self.number = new_number
+        self.name = f"Waypoint {self.number}"
         self.update_display_name()
 
 class CustomScrollArea(QScrollArea):
@@ -171,11 +182,11 @@ class DrawableLabel(QLabel):
     waypoint_updated = Signal(Waypoint)  # 角度更新用のシグナルを追加
     waypoint_completed = Signal(QPoint)  # 角度確定用のシグナルを追加
     mouse_position_changed = Signal(QPoint)  # マウス位置シグナルを追加
+    waypoint_edited = Signal(Waypoint)  # ウェイポイント編集完了時のシグナル
 
     def __init__(self, parent=None):
         super().__init__(parent)
         self.drawing_enabled = False
-        self.last_pos = None
         self.parent_viewer = None
         self.cursor_pixmap = None  # カーソル用のピクスマップ
         self.current_cursor_size = 0  # 現在のカーソルサイズ
@@ -1636,7 +1647,7 @@ class MainWindow(QMainWindow):
                 img_array = img_array.reshape((height, width))
                 
                 self.image_viewer.load_image(img_array, width, height)
-                print(f"Successfully loaded image: {width}x{height}, max value: {max_val}")
+                print(f"Successfully loaded image: {width}x{height}, max value: {255}")
 
         except Exception as e:
             print(f"Error loading PGM file: {str(e)}")
