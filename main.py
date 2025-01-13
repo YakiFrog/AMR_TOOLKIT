@@ -1,4 +1,5 @@
 import sys
+import os
 import numpy as np
 import yaml  # PyYAMLをインポート
 from PySide6.QtWidgets import (QApplication, QMainWindow, QWidget, QVBoxLayout, 
@@ -1663,8 +1664,40 @@ class MainWindow(QMainWindow):
         self.menu_panel.zoom_label.setText(f"{zoom_percent}%")
 
     def load_yaml_file(self, file_path):
-        """YAMLファイルの読み込みをImageViewerに委譲"""
-        self.image_viewer.load_yaml_file(file_path)
+        """YAMLファイルの読み込みとPGMファイルの自動読み込み"""
+        try:
+            # YAMLファイルを読み込む
+            with open(file_path, 'r') as f:
+                yaml_data = yaml.safe_load(f)
+            
+            # YAMLファイルのディレクトリパスを取得
+            yaml_dir = os.path.dirname(file_path)
+            
+            # 画像ファイルのパスを取得し、関連するPGMファイルを読み込む
+            if 'image' in yaml_data:
+                pgm_filename = yaml_data['image']
+                # 相対パスの場合はYAMLファイルのディレクトリを基準に絶対パスを構築
+                if not os.path.isabs(pgm_filename):
+                    pgm_path = os.path.join(yaml_dir, pgm_filename)
+                else:
+                    pgm_path = pgm_filename
+                
+                # PGMファイルが存在する場合は読み込む
+                if os.path.exists(pgm_path):
+                    # ファイル名ラベルを更新
+                    self.menu_panel.file_name_label.setText(os.path.basename(pgm_path))
+                    # PGMファイルを読み込む
+                    self.load_pgm_file(pgm_path)
+                else:
+                    print(f"PGM file not found: {pgm_path}")
+            
+            # 原点情報などのYAMLデータを読み込む
+            self.image_viewer.load_yaml_file(file_path)
+            
+        except Exception as e:
+            print(f"Error loading YAML file: {str(e)}")
+            import traceback
+            traceback.print_exc()
 
 def main():
     """アプリケーションのメインエントリーポイント"""
