@@ -163,6 +163,7 @@ class DrawableLabel(QLabel):
     waypoint_clicked = Signal(QPoint)  # ウェイポイト追加用のシグナルを追加
     waypoint_updated = Signal(Waypoint)  # 角度更新用のシグナルを追加
     waypoint_completed = Signal(QPoint)  # 角度確定用のシグナルを追加
+    mouse_position_changed = Signal(QPoint)  # マウス位置シグナルを追加
 
     def __init__(self, parent=None):
         super().__init__(parent)
@@ -238,6 +239,9 @@ class DrawableLabel(QLabel):
             super().mousePressEvent(event)
 
     def mouseMoveEvent(self, event):
+        # マウス位置を通知
+        self.mouse_position_changed.emit(event.pos())
+        # 既存の処理を継続
         if self.drawing_enabled and self.parent_viewer:
             if self.is_setting_angle and self.parent_viewer.drawing_mode == DrawingMode.WAYPOINT:
                 if self.temp_waypoint and self.click_pos:
@@ -284,13 +288,13 @@ class Layer(QWidget):  # QObjectを継承してシグナルを使用可能に
         self.opacity = 1.0
 
     def set_visible(self, visible):
-        if self.visible != visible:
+        if (self.visible != visible):
             self.visible = visible
             self.changed.emit()
 
     def set_opacity(self, opacity):
         new_opacity = max(0.0, min(1.0, opacity))
-        if self.opacity != new_opacity:
+        if (self.opacity != new_opacity):
             self.opacity = new_opacity
             self.changed.emit()
 
@@ -312,6 +316,20 @@ class ImageViewer(QWidget):
         self.pen_size = 2       # デフォルトのペンサイズ
         self.eraser_size = 10   # デフォルトの消しゴムサイズ
         
+        # 座標表示用ラベルを最初に初期化（この1箇所だけにする）
+        self.coord_label = QLabel()
+        self.coord_label.setStyleSheet("""
+            QLabel {
+                background-color: rgba(255, 255, 255, 0.8);
+                border: 1px solid #ccc;
+                border-radius: 3px;
+                padding: 3px 8px;
+                font-size: 12px;
+                font-family: monospace;
+            }
+        """)
+        self.coord_label.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        
         # レイヤー管理
         self.layers = []
         self.active_layer = None
@@ -330,6 +348,9 @@ class ImageViewer(QWidget):
         self.waypoints = []  # ウェイポイントのリスト
         self.waypoint_size = 15  # ウェイポイントのサイズを大きく
 
+        self.show_grid = False  # グリッド表示フラグを追加
+        self.grid_size = 50     # グリッドサイズ（ピクセル単位）
+
         self.setup_display()
         self.setup_scroll_area()
         self.setup_drawing_tools()
@@ -342,6 +363,7 @@ class ImageViewer(QWidget):
         self.pgm_display.setStyleSheet("background-color: white;")
         self.pgm_display.waypoint_clicked.connect(self.add_waypoint)
         self.pgm_display.waypoint_updated.connect(self.update_waypoint)
+        self.pgm_display.mouse_position_changed.connect(self.update_mouse_position)
 
     def setup_scroll_area(self):
         """スクロールエリアの設定を集約"""
@@ -354,6 +376,23 @@ class ImageViewer(QWidget):
 
         self.setLayout(QVBoxLayout())
         self.layout().addWidget(self.scroll_area)
+
+        # 座標表示用ラベルをスクロールエリアのビューポートの子として設定
+        self.coord_label.setParent(self.scroll_area.viewport())
+        self.coord_label.hide()  # 初期状態では非表示
+
+        # スクロールエリアのリサイズイベントをオーバーライド
+        original_resize_event = self.scroll_area.resizeEvent
+        def new_resize_event(event):
+            original_resize_event(event)
+            # 座標ラベルを右上に配置
+            label_width = 150
+            label_height = 25
+            new_x = self.scroll_area.viewport().width() - label_width - 10
+            new_y = 10  # 上端から10ピクセルの位置
+            self.coord_label.setGeometry(new_x, new_y, label_width, label_height)
+            self.coord_label.raise_()  # ラベルを最前面に表示
+        self.scroll_area.resizeEvent = new_resize_event
 
     def setup_drawing_tools(self):
         """描画ツールの設定"""
@@ -514,6 +553,7 @@ class ImageViewer(QWidget):
         self.drawing_layer.pixmap = QPixmap(self.pgm_layer.pixmap.size())
         self.drawing_layer.pixmap.fill(Qt.GlobalColor.transparent)
         self.update_display()
+        self.coord_label.show()  # 画像読み込み時に座標表示を有効化
 
     def zoom_in(self):
         self.scale_factor *= 1.2
@@ -588,8 +628,23 @@ class ImageViewer(QWidget):
             painter.setOpacity(self.pgm_layer.opacity)
             painter.drawPixmap(0, 0, self.pgm_layer.pixmap)
 
+        # グリッドの描画
+        if self.show_grid:
+            painter.setOpacity(0.3)  # グリッドの透明度
+            pen = QPen(Qt.GlobalColor.gray)
+            pen.setStyle(Qt.PenStyle.DashLine)  # 破線スタイル
+            painter.setPen(pen)
+
+            # 縦線を描画
+            for x in range(0, result.width(), self.grid_size):
+                painter.drawLine(x, 0, x, result.height())
+
+            # 横線を描画
+            for y in range(0, result.height(), self.grid_size):
+                painter.drawLine(0, y, result.width(), y)
+
         # ウェイポイントの描画（Waypointレイヤーの表示状態とopacityを考慮）
-        if self.waypoints and self.waypoint_layer.visible:
+        if (self.waypoints and self.waypoint_layer.visible):
             painter.setOpacity(self.waypoint_layer.opacity)
             painter.setRenderHint(QPainter.RenderHint.Antialiasing)
             
@@ -738,6 +793,28 @@ class ImageViewer(QWidget):
             
         self.update_display()
 
+    def toggle_grid(self):
+        """グリッド表示の切り替え"""
+        self.show_grid = not self.show_grid
+        self.update_display()
+
+    def update_mouse_position(self, pos):
+        """マウス位置の更新とラベル表示"""
+        if not self.pgm_layer.pixmap:
+            return
+
+        # 表示座標からピクセル座標に変換
+        pixmap_geometry = self.pgm_display.geometry()
+        scale_x = self.pgm_layer.pixmap.width() / pixmap_geometry.width()
+        scale_y = self.pgm_layer.pixmap.height() / pixmap_geometry.height()
+        
+        pixel_x = int(pos.x() * scale_x)
+        pixel_y = int(pos.y() * scale_y)
+        
+        # 座標を表示
+        self.coord_label.setText(f"X: {pixel_x}, Y: {pixel_y}")
+        self.coord_label.show()
+
 class MenuPanel(QWidget):
     """メニューパネル
     ファイル操作とズーム制御のUIを提供"""
@@ -786,6 +863,24 @@ class MenuPanel(QWidget):
         layout.addWidget(menu_bar)
         layout.addLayout(file_layout)  # ファイル選択部分を追加
         layout.addWidget(zoom_widget)
+
+        # グリッドボタンを追加
+        self.grid_button = QPushButton("Toggle Grid")
+        self.grid_button.setCheckable(True)  # トグルボタンとして設定
+        self.grid_button.setStyleSheet("""
+            QPushButton {
+                padding: 5px 10px;
+                background-color: #f0f0f0;
+                border: 1px solid #ccc;
+                border-radius: 3px;
+            }
+            QPushButton:checked {
+                background-color: #e0e0e0;
+                border: 2px solid #999;
+            }
+        """)
+        file_layout.addWidget(self.grid_button)  # file_layoutにグリッドボタンを追加
+
         self.setLayout(layout)
 
     def create_zoom_controls(self):
@@ -1288,6 +1383,9 @@ class MainWindow(QMainWindow):
         # ImageViewerからのスケール変更通知を処理
         self.image_viewer.scale_changed.connect(self.handle_scale_changed)
         
+        # グリッドボタンのシグナルを接続
+        self.menu_panel.grid_button.clicked.connect(self.image_viewer.toggle_grid)
+
         # 左側レイアウトの構成
         left_layout.addWidget(self.menu_panel)
         left_layout.addWidget(self.image_viewer)
