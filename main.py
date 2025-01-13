@@ -7,7 +7,7 @@ from PySide6.QtWidgets import (QApplication, QMainWindow, QWidget, QVBoxLayout,
                               QPinchGesture, QSlider, QCheckBox, QFrame)
 from PySide6.QtCore import Qt, QPoint, Signal, QEvent, QSize, QMimeData
 from PySide6.QtGui import (QPixmap, QImage, QWheelEvent, QPainter, QPen, QCursor,
-                          QDrag)  # QDragをQtGuiからインポート
+                          QDrag, QColor)  # QDragをQtGuiからインポート
 from enum import Enum
 
 # 共通のスタイル定義
@@ -347,7 +347,8 @@ class ImageViewer(QWidget):
         self.drawing_layer = Layer("Drawing Layer")
         self.waypoint_layer = Layer("Waypoint Layer")  # ウェイポイントレイヤーを追加
         self.origin_layer = Layer("Origin Layer")  # originレイヤーを追加
-        self.layers = [self.pgm_layer, self.waypoint_layer, self.drawing_layer, self.origin_layer]  # 順序を変更
+        self.path_layer = Layer("Path Layer")  # パスレイヤーを追加
+        self.layers = [self.pgm_layer, self.path_layer, self.waypoint_layer, self.drawing_layer, self.origin_layer]  # 順序を変更
         self.active_layer = self.drawing_layer
         
         # レイヤーの変更通知を接続
@@ -670,38 +671,36 @@ class ImageViewer(QWidget):
                 x, y = waypoint.pixel_x, waypoint.pixel_y
                 size = self.waypoint_size
                 
-                # 矢印の描画
-                pen = QPen(Qt.GlobalColor.red)
+                # 矢印の描画（透明度を調整）
+                pen = QPen(QColor(255, 0, 0, 180))  # 赤色で透明度を設定
                 pen.setWidth(3)
                 painter.setPen(pen)
                 
                 angle_line_length = size * 3
-                # 矢印の方向を修正（Y軸を反転）
                 end_x = x + int(angle_line_length * np.cos(waypoint.angle))
-                end_y = y - int(angle_line_length * np.sin(waypoint.angle))  # マイナスに変更
+                end_y = y - int(angle_line_length * np.sin(waypoint.angle))
                 painter.drawLine(x, y, end_x, end_y)
                 
-                # 矢印の先端の角度を修正
+                # 矢印の先端の描画（同じ透明度）
                 arrow_size = size // 2
                 arrow_angle1 = waypoint.angle + np.pi * 3/4
                 arrow_angle2 = waypoint.angle - np.pi * 3/4
                 
-                # 矢印の先端の座標計算も修正（Y軸を反転）
                 arrow_x1 = end_x + int(arrow_size * np.cos(arrow_angle1))
-                arrow_y1 = end_y - int(arrow_size * np.sin(arrow_angle1))  # マイナスに変更
+                arrow_y1 = end_y - int(arrow_size * np.sin(arrow_angle1))
                 arrow_x2 = end_x + int(arrow_size * np.cos(arrow_angle2))
-                arrow_y2 = end_y - int(arrow_size * np.sin(arrow_angle2))  # マイナスに変更
+                arrow_y2 = end_y - int(arrow_size * np.sin(arrow_angle2))
                 
                 painter.drawLine(end_x, end_y, arrow_x1, arrow_y1)
                 painter.drawLine(end_x, end_y, arrow_x2, arrow_y2)
                 
-                # 番号を表示する円を描画
+                # 円を描画（透明度を調整）
                 painter.setPen(Qt.PenStyle.NoPen)
-                painter.setBrush(Qt.GlobalColor.red)
+                painter.setBrush(QColor(255, 0, 0, 180))  # 赤色で透明度を設定
                 painter.drawEllipse(x - size, y - size, size * 2, size * 2)
                 
                 # 番号を描画
-                painter.setPen(Qt.GlobalColor.white)
+                painter.setPen(QColor(255, 255, 255, 230))  # 白色で高い不透明度
                 font = self.font()
                 font.setPointSize(19)
                 font.setBold(True)
@@ -909,6 +908,39 @@ class ImageViewer(QWidget):
         painter.end()
         self.update_display()
 
+    def generate_path(self):
+        """ウェイポイント間のパスを生成または非表示"""
+        if not self.path_layer.pixmap or self.path_layer.pixmap.size() != self.pgm_layer.pixmap.size():
+            self.path_layer.pixmap = QPixmap(self.pgm_layer.pixmap.size())
+
+        # パスレイヤーをクリア
+        self.path_layer.pixmap.fill(Qt.GlobalColor.transparent)
+
+        # パス生成ボタンがチェックされている場合のみパスを描画
+        parent = self.parent()
+        while parent and not isinstance(parent, MainWindow):
+            parent = parent.parent()
+            
+        if parent and parent.analysis_panel.generate_path_button.isChecked():
+            if self.waypoints and len(self.waypoints) >= 2:
+                painter = QPainter(self.path_layer.pixmap)
+                painter.setRenderHint(QPainter.RenderHint.Antialiasing)
+                
+                # パスのスタイル設定
+                pen = QPen(Qt.GlobalColor.blue, 3)  # 青色、太さ3
+                pen.setStyle(Qt.PenStyle.SolidLine)
+                painter.setPen(pen)
+                
+                # ウェイポイントを順番に接続
+                for i in range(len(self.waypoints) - 1):
+                    start = self.waypoints[i]
+                    end = self.waypoints[i + 1]
+                    painter.drawLine(start.pixel_x, start.pixel_y, end.pixel_x, end.pixel_y)
+                
+                painter.end()
+
+        self.update_display()
+
 class MenuPanel(QWidget):
     """メニューパネル
     ファイル操作とズーム制御のUIを提供"""
@@ -1095,6 +1127,7 @@ class RightPanel(QWidget):
     waypoint_delete_requested = Signal(int)  # 新しいシグナルを追加
     all_waypoints_delete_requested = Signal()  # 新しいシグナル
     waypoint_reorder_requested = Signal(int, int)  # 順序変更シグナルを追加
+    generate_path_requested = Signal()  # パス生成用シグナル
     
     def __init__(self):
         super().__init__()
@@ -1203,6 +1236,26 @@ class RightPanel(QWidget):
             }
         """)
         
+        # パス生成ボタン（トグルボタンに変更）
+        self.generate_path_button = QPushButton("Generate Path")
+        self.generate_path_button.setCheckable(True)  # トグルボタンに設定
+        self.generate_path_button.setStyleSheet("""
+            QPushButton {
+                background-color: #4CAF50;
+                color: white;
+                border-radius: 3px;
+                padding: 5px 10px;
+                font-size: 12px;
+            }
+            QPushButton:checked {
+                background-color: #45a049;
+            }
+            QPushButton:hover {
+                background-color: #45a049;
+            }
+        """)
+        self.generate_path_button.clicked.connect(self.handle_path_toggle)
+        
         # 全削除ボタン
         clear_button = QPushButton("×")
         clear_button.setFixedSize(20, 20)
@@ -1222,7 +1275,8 @@ class RightPanel(QWidget):
         clear_button.clicked.connect(self.all_waypoints_delete_requested.emit)
         
         header_layout.addWidget(title_label)
-        header_layout.addStretch()  # タイトルとボタンの間にスペースを追加
+        header_layout.addStretch()
+        header_layout.addWidget(self.generate_path_button)  # パス生成ボタンを追加
         header_layout.addWidget(clear_button)
         
         # スクロールエリアの作成
@@ -1260,6 +1314,14 @@ class RightPanel(QWidget):
         layout.addWidget(scroll_area)
         
         return widget
+
+    def handle_path_toggle(self):
+        """パスの表示/非表示を切り替え"""
+        if self.generate_path_button.isChecked():
+            self.generate_path_requested.emit()  # パスを生成
+        else:
+            # パスを非表示にする
+            self.generate_path_requested.emit()  # パスをクリア
 
     def add_waypoint_to_list(self, waypoint):
         """ウェイポイントリストに新しいウェイポイントを追加"""
@@ -1539,6 +1601,10 @@ class MainWindow(QMainWindow):
         # ウェイポイントの順序変更時の処理を接続
         self.analysis_panel.waypoint_reorder_requested.connect(
             self.image_viewer.reorder_waypoints)
+
+        # パス生成時の処理を接続
+        self.analysis_panel.generate_path_requested.connect(
+            self.image_viewer.generate_path)
 
     def update_layer_panel(self):
         """レイヤーパネルの表示を更新"""
