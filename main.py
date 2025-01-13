@@ -6,7 +6,7 @@ from PySide6.QtWidgets import (QApplication, QMainWindow, QWidget, QVBoxLayout,
                               QHBoxLayout, QMenuBar, QMenu, QLabel, QPushButton,
                               QFileDialog, QScrollArea, QSplitter, QGesture, 
                               QPinchGesture, QSlider, QCheckBox, QFrame)
-from PySide6.QtCore import Qt, QPoint, Signal, QEvent, QSize, QMimeData
+from PySide6.QtCore import Qt, QPoint, Signal, QEvent, QSize, QMimeData, QTimer
 from PySide6.QtGui import (QPixmap, QImage, QWheelEvent, QPainter, QPen, QCursor,
                           QDrag, QColor)  # QDragをQtGuiからインポート
 from enum import Enum
@@ -50,14 +50,13 @@ class Waypoint:
     def __init__(self, pixel_x, pixel_y, angle=0, name=None):
         Waypoint.counter += 1
         self.number = Waypoint.counter
-        # ピクセル座標
         self.pixel_x = pixel_x
         self.pixel_y = pixel_y
-        # メートル座標（初期値は0）
         self.x = 0
         self.y = 0
         self.angle = angle
         self.name = name if name else f"Waypoint {self.number}"
+        self.resolution = 0.05  # 解像度を保存
         self.update_display_name()
 
     def set_angle(self, angle):
@@ -72,6 +71,11 @@ class Waypoint:
 
     def update_metric_coordinates(self, origin_x, origin_y, resolution):
         """ピクセル座標からメートル座標を計算"""
+        # 原点情報を保存
+        self._origin_x = origin_x
+        self._origin_y = origin_y
+        self.resolution = resolution
+        
         # 原点からの相対位置をピクセルで計算
         rel_x = self.pixel_x - origin_x
         rel_y = origin_y - self.pixel_y  # y軸は反転
@@ -86,6 +90,14 @@ class Waypoint:
         self.number = new_number
         self.name = f"Waypoint {self.number}"
         self.update_display_name()
+
+    def set_position(self, x, y):
+        """ピクセル座標を更新"""
+        self.pixel_x = x
+        self.pixel_y = y
+        if hasattr(self, '_origin_x') and hasattr(self, '_origin_y'):
+            # 既存の原点情報がある場合は座標を更新
+            self.update_metric_coordinates(self._origin_x, self._origin_y, self.resolution)
 
 class CustomScrollArea(QScrollArea):
     """カスタムスクロールエリアクラス
@@ -194,6 +206,12 @@ class DrawableLabel(QLabel):
         self.temp_waypoint = None  # 一時的なウェイポイント保存用
         self.is_setting_angle = False  # 角度設定中フラグ
         self.click_pos = None  # クリック位置を保存
+        self.edit_mode = False  # 編集モード状態
+        self.editing_waypoint = None  # 編集中のウェイポイント
+        self.is_dragging = False
+        self.drag_start = None
+        self.last_pos = None  # Add this line
+        self.is_editing_angle = False
 
     def set_drawing_mode(self, enabled):
         self.drawing_enabled = enabled
@@ -239,41 +257,113 @@ class DrawableLabel(QLabel):
             cursor = QCursor(self.cursor_pixmap, cursor_size // 2, cursor_size // 2)
             self.setCursor(cursor)
 
+    def mouseDoubleClickEvent(self, event):
+        """ウェイポイントをダブルクリックして編集モードの切り替え"""
+        if not self.parent_viewer:
+            return
+            
+        pos = event.pos()
+        pixmap_geometry = self.geometry()
+        if self.parent_viewer.drawing_layer.pixmap:
+            scale_x = self.parent_viewer.drawing_layer.pixmap.width() / pixmap_geometry.width()
+            scale_y = self.parent_viewer.drawing_layer.pixmap.height() / pixmap_geometry.height()
+            x = int(pos.x() * scale_x)
+            y = int(pos.y() * scale_y)
+            
+            if self.edit_mode and self.editing_waypoint:
+                # 編集モードを終了
+                self.edit_mode = False
+                self.editing_waypoint = None
+                self.setCursor(Qt.CursorShape.ArrowCursor)
+                if self.parent_viewer:
+                    self.parent_viewer.update_display()  # 表示を更新して赤色に戻す
+            else:
+                # クリックされた位置にあるウェイポイントを探す
+                for waypoint in self.parent_viewer.waypoints:
+                    if abs(waypoint.pixel_x - x) < 15 and abs(waypoint.pixel_y - y) < 15:
+                        self.edit_mode = True
+                        self.editing_waypoint = waypoint
+                        self.setCursor(Qt.CursorShape.SizeAllCursor)
+                        # ステータスメッセージを表示
+                        if self.parent_viewer:
+                            self.parent_viewer.show_edit_message("ドラッグで移動、Shift+ドラッグで角度を変更")
+                            self.parent_viewer.update_display()  # 表示を更新して青色に変更
+                        break
+
     def mousePressEvent(self, event):
         if self.drawing_enabled and self.parent_viewer:
             if self.parent_viewer.drawing_mode == DrawingMode.WAYPOINT:
                 if event.button() == Qt.MouseButton.LeftButton:
-                    self.click_pos = event.pos()  # クリック位置を保存
+                    pos = event.position().toPoint()
+                    self.click_pos = pos  # クリック位置を保存
                     self.is_setting_angle = True
-                    self.waypoint_clicked.emit(event.pos())
+                    self.waypoint_clicked.emit(pos)
             else:
-                pos = event.pos()
+                pos = event.position().toPoint()
                 self.last_pos = pos
                 self.parent_viewer.draw_line(pos, pos)  # 点を描画
-        # elif event.button() == Qt.MouseButton.RightButton:
-        #     # 右クリックでウェイポイントを追加
-        #     self.waypoint_clicked.emit(event.pos())
+        elif self.edit_mode and self.editing_waypoint:
+            pos = event.pos()
+            pixmap_geometry = self.geometry()
+            if self.parent_viewer.drawing_layer.pixmap:
+                scale_x = self.parent_viewer.drawing_layer.pixmap.width() / pixmap_geometry.width()
+                scale_y = self.parent_viewer.drawing_layer.pixmap.height() / pixmap_geometry.height()
+                x = int(pos.x() * scale_x)
+                y = int(pos.y() * scale_y)
+
+                if event.modifiers() & Qt.KeyboardModifier.ShiftModifier:
+                    # Shiftキーが押されている場合は角度編集モード
+                    self.is_editing_angle = True
+                    self.editing_start_pos = pos
+                else:
+                    # 通常クリックは位置の移動
+                    self.editing_waypoint.set_position(x, y)
+                    if self.parent_viewer:
+                        self.parent_viewer.update_display()
+                        self.parent_viewer.waypoint_edited.emit(self.editing_waypoint)
         else:
             super().mousePressEvent(event)
 
     def mouseMoveEvent(self, event):
         # マウス位置を通知
-        self.mouse_position_changed.emit(event.pos())
+        pos = event.position().toPoint()
+        self.mouse_position_changed.emit(pos)
         # 既存の処理を継続
         if self.drawing_enabled and self.parent_viewer:
             if self.is_setting_angle and self.parent_viewer.drawing_mode == DrawingMode.WAYPOINT:
                 if self.temp_waypoint and self.click_pos:
                     # プレビュー用の角度計算（Y軸を反転）
-                    dx = event.pos().x() - self.click_pos.x()
-                    dy = -(event.pos().y() - self.click_pos.y())  # Y軸を反転
+                    dx = pos.x() - self.click_pos.x()
+                    dy = -(pos.y() - self.click_pos.y())  # Y軸を反転
                     angle = np.arctan2(dy, dx)
                     self.temp_waypoint.set_angle(angle)
                     self.waypoint_updated.emit(self.temp_waypoint)
             elif self.last_pos:
-                pos = event.pos()
                 self.parent_viewer.draw_line(self.last_pos, pos)  # 線を描画
                 self.last_pos = pos
                 self.updateCursor()  # マウス移動時にカーソルを更新
+        elif self.edit_mode and self.editing_waypoint:
+            pos = event.pos()
+            pixmap_geometry = self.geometry()
+            if self.parent_viewer.drawing_layer.pixmap:
+                scale_x = self.parent_viewer.drawing_layer.pixmap.width() / pixmap_geometry.width()
+                scale_y = self.parent_viewer.drawing_layer.pixmap.height() / pixmap_geometry.height()
+                x = int(pos.x() * scale_x)
+                y = int(pos.y() * scale_y)
+
+                if self.is_editing_angle:
+                    # 角度の計算
+                    dx = pos.x() - self.editing_start_pos.x()
+                    dy = -(pos.y() - self.editing_start_pos.y())  # Y軸を反転
+                    angle = np.arctan2(dy, dx)
+                    self.editing_waypoint.set_angle(angle)
+                else:
+                    # 位置の更新
+                    self.editing_waypoint.set_position(x, y)
+
+                if self.parent_viewer:
+                    self.parent_viewer.update_display()
+                    self.parent_viewer.waypoint_edited.emit(self.editing_waypoint)
         else:
             super().mouseMoveEvent(event)
 
@@ -291,6 +381,11 @@ class DrawableLabel(QLabel):
                 self.click_pos = None
                 self.temp_waypoint = None
             self.last_pos = None
+        elif self.edit_mode and self.editing_waypoint:
+            self.is_editing_angle = False
+            if self.parent_viewer:
+                self.parent_viewer.update_display()
+                self.parent_viewer.waypoint_edited.emit(self.editing_waypoint)
         else:
             super().mouseReleaseEvent(event)
 
@@ -324,6 +419,7 @@ class ImageViewer(QWidget):
     layer_changed = Signal()  # レイヤーの状態変更通知用
     waypoint_added = Signal(Waypoint)  # ウェイポイント追加通知用のシグナル
     waypoint_removed = Signal(int)  # 削除シグナルを追加
+    waypoint_edited = Signal(Waypoint)  # 編集完了シグナルを追加
     
     def __init__(self):
         super().__init__()
@@ -381,6 +477,22 @@ class ImageViewer(QWidget):
         self.setup_scroll_area()
         self.setup_drawing_tools()
 
+        # ステータスメッセージ用のラベルを追加
+        self.status_label = QLabel()
+        self.status_label.setStyleSheet("""
+            QLabel {
+                background-color: rgba(0, 0, 0, 0.7);
+                color: white;
+                padding: 8px;
+                border-radius: 4px;
+                font-size: 12px;
+            }
+        """)
+        self.status_label.hide()
+
+        # シグナルを接続
+        self.pgm_display.waypoint_edited.connect(self.handle_waypoint_edited)
+
     def setup_display(self):
         """画像表示用ラベルの設定を集約"""
         self.pgm_display = DrawableLabel()
@@ -417,8 +529,23 @@ class ImageViewer(QWidget):
             new_x = self.scroll_area.viewport().width() - label_width - 30  # 30ピクセル左に移動
             new_y = 10  # 上端から10ピクセルの位置
             self.coord_label.setGeometry(new_x, new_y, label_width, label_height)
-            self.coord_label.raise_()  # ラベルを最前面に表示
+            
+            # ステータスメッセージを中央上部に配置
+            status_width = 300
+            status_height = 30
+            status_x = (self.scroll_area.viewport().width() - status_width) // 2
+            self.status_label.setGeometry(status_x, 10, status_width, status_height)
+            
+            self.coord_label.raise_()
+            self.status_label.raise_()
         self.scroll_area.resizeEvent = new_resize_event
+
+    def show_edit_message(self, message):
+        """編集時のヘルプメッセージを表示"""
+        self.status_label.setText(message)
+        self.status_label.show()
+        # 3秒後にメッセージを非表示
+        QTimer.singleShot(3000, self.status_label.hide)
 
     def setup_drawing_tools(self):
         """描画ツールの設定"""
@@ -684,18 +811,28 @@ class ImageViewer(QWidget):
                 x, y = waypoint.pixel_x, waypoint.pixel_y
                 size = self.waypoint_size
                 
-                # 矢印の描画（透明度を調整）
-                pen = QPen(QColor(255, 0, 0, 255))  # 赤色で透明度を設定
+                # 編集中のウェイポイントは特別な表示
+                is_editing = (self.pgm_display.edit_mode and 
+                            self.pgm_display.editing_waypoint and 
+                            self.pgm_display.editing_waypoint.number == waypoint.number)
+                
+                # 編集中は青色で表示
+                color = QColor(0, 120, 255, 255) if is_editing else QColor(255, 0, 0, 255)
+                size_multiplier = 1.2 if is_editing else 1.0
+                
+                # 矢印の描画
+                pen = QPen(color)
                 pen.setWidth(3)
                 painter.setPen(pen)
                 
-                angle_line_length = size * 3
+                adjusted_size = size * size_multiplier
+                angle_line_length = adjusted_size * 3
                 end_x = x + int(angle_line_length * np.cos(waypoint.angle))
                 end_y = y - int(angle_line_length * np.sin(waypoint.angle))
                 painter.drawLine(x, y, end_x, end_y)
-                
-                # 矢印の先端の描画（同じ透明度）
-                arrow_size = size // 2
+
+                # 矢印の先端
+                arrow_size = adjusted_size // 2
                 arrow_angle1 = waypoint.angle + np.pi * 3/4
                 arrow_angle2 = waypoint.angle - np.pi * 3/4
                 
@@ -707,13 +844,14 @@ class ImageViewer(QWidget):
                 painter.drawLine(end_x, end_y, arrow_x1, arrow_y1)
                 painter.drawLine(end_x, end_y, arrow_x2, arrow_y2)
                 
-                # 円を描画（透明度を調整）
+                # 円を描画
                 painter.setPen(Qt.PenStyle.NoPen)
-                painter.setBrush(QColor(255, 0, 0, 255))  # 赤色で透明度を設定
-                painter.drawEllipse(x - size, y - size, size * 2, size * 2)
+                painter.setBrush(color)
+                painter.drawEllipse(x - adjusted_size, y - adjusted_size, 
+                                  adjusted_size * 2, adjusted_size * 2)
                 
                 # 番号を描画
-                painter.setPen(QColor(255, 255, 255, 230))  # 白色で高い不透明度
+                painter.setPen(QColor(255, 255, 255, 230))
                 font = self.font()
                 font.setPointSize(19)
                 font.setBold(True)
@@ -923,36 +1061,57 @@ class ImageViewer(QWidget):
 
     def generate_path(self):
         """ウェイポイント間のパスを生成または非表示"""
-        if not self.path_layer.pixmap or self.path_layer.pixmap.size() != self.pgm_layer.pixmap.size():
-            self.path_layer.pixmap = QPixmap(self.pgm_layer.pixmap.size())
+        if self.waypoints and len(self.waypoints) >= 2:
+            if not self.path_layer.pixmap or self.path_layer.pixmap.size() != self.pgm_layer.pixmap.size():
+                self.path_layer.pixmap = QPixmap(self.pgm_layer.pixmap.size())
 
-        # パスレイヤーをクリア
-        self.path_layer.pixmap.fill(Qt.GlobalColor.transparent)
+            # パスレイヤーをクリア
+            self.path_layer.pixmap.fill(Qt.GlobalColor.transparent)
 
-        # パス生成ボタンがチェックされている場合のみパスを描画
-        parent = self.parent()
-        while parent and not isinstance(parent, MainWindow):
-            parent = parent.parent()
-            
-        if parent and parent.analysis_panel.generate_path_button.isChecked():
-            if self.waypoints and len(self.waypoints) >= 2:
-                painter = QPainter(self.path_layer.pixmap)
-                painter.setRenderHint(QPainter.RenderHint.Antialiasing)
+            # パス生成ボタンがチェックされている場合のみパスを描画
+            parent = self.parent()
+            while parent and not isinstance(parent, MainWindow):
+                parent = parent.parent()
                 
-                # パスのスタイル設定
-                pen = QPen(Qt.GlobalColor.green, 3)  # 青色、太さ3
-                pen.setStyle(Qt.PenStyle.SolidLine)
-                painter.setPen(pen)
-                
-                # ウェイポイントを順番に接続
-                for i in range(len(self.waypoints) - 1):
-                    start = self.waypoints[i]
-                    end = self.waypoints[i + 1]
-                    painter.drawLine(start.pixel_x, start.pixel_y, end.pixel_x, end.pixel_y)
-                
-                painter.end()
+            if parent and parent.analysis_panel.generate_path_button.isChecked():
+                if self.waypoints and len(self.waypoints) >= 2:
+                    painter = QPainter(self.path_layer.pixmap)
+                    painter.setRenderHint(QPainter.RenderHint.Antialiasing)
+                    
+                    # パスのスタイル設定
+                    pen = QPen(Qt.GlobalColor.green, 3)  # 青色、太さ3
+                    pen.setStyle(Qt.PenStyle.SolidLine)
+                    painter.setPen(pen)
+                    
+                    # ウェイポイントを順番に接続
+                    for i in range(len(self.waypoints) - 1):
+                        start = self.waypoints[i]
+                        end = self.waypoints[i + 1]
+                        painter.drawLine(start.pixel_x, start.pixel_y, end.pixel_x, end.pixel_y)
+                    
+                    painter.end()
 
+            self.update_display()
+
+    def handle_waypoint_edited(self, waypoint):
+        """ウェイポイント編集時の処理"""
+        if self.origin_point:  # 原点が設定されている場合
+            origin_x, origin_y = self.origin_point
+            waypoint.update_metric_coordinates(origin_x, origin_y, self.resolution)
+        self.waypoint_edited.emit(waypoint)
         self.update_display()
+
+    def enter_edit_mode(self, waypoint):
+        """ウェイポイントの編集モードに入る"""
+        self.pgm_display.edit_mode = True
+        self.pgm_display.editing_waypoint = waypoint
+        self.pgm_display.setCursor(Qt.CursorShape.SizeAllCursor)
+
+    def exit_edit_mode(self):
+        """編集モードを終了"""
+        self.pgm_display.edit_mode = False
+        self.pgm_display.editing_waypoint = None
+        self.pgm_display.setCursor(Qt.CursorShape.ArrowCursor)
 
 class MenuPanel(QWidget):
     """メニューパネル
@@ -1457,6 +1616,31 @@ class WaypointListItem(QWidget):
         """)
         delete_button.clicked.connect(lambda: self.delete_clicked.emit(self.waypoint_number))
         
+        # 編集ボタンを追加
+        edit_button = QPushButton("✎")
+        edit_button.setFixedSize(20, 20)
+        edit_button.setStyleSheet("""
+            QPushButton {
+                background-color: #4CAF50;
+                color: white;
+                border-radius: 10px;
+                font-weight: bold;
+                font-size: 12px;
+            }
+            QPushButton:hover {
+                background-color: #45a049;
+            }
+            QPushButton:checked {
+                background-color: #357a38;
+            }
+        """)
+        edit_button.setCheckable(True)
+        edit_button.clicked.connect(self.toggle_edit_mode)
+        
+        # フレームにウィジェットを追加（編集ボタンを追加）
+        frame_layout.addWidget(edit_button)
+        frame_layout.addWidget(delete_button)
+
         # フレームにウィジェットを追加
         frame_layout.addWidget(self.label, stretch=1)
         frame_layout.addWidget(delete_button)
@@ -1481,12 +1665,18 @@ class WaypointListItem(QWidget):
         self.label.setText(text)
 
     def mousePressEvent(self, event):
+        if not self.isVisible():  # Add check for widget visibility
+            return
         if event.button() == Qt.MouseButton.LeftButton:
-            drag = QDrag(self)
-            mime_data = QMimeData()
-            mime_data.setText(str(self.waypoint_number))
-            drag.setMimeData(mime_data)
-            drag.exec()
+            try:
+                drag = QDrag(self)
+                mime_data = QMimeData()
+                mime_data.setText(str(self.waypoint_number))
+                drag.setMimeData(mime_data)
+                drag.exec()
+            except RuntimeError:
+                # Handle case where widget is already deleted
+                pass
         super().mousePressEvent(event)
 
     def dragEnterEvent(self, event):
@@ -1536,6 +1726,17 @@ class WaypointListItem(QWidget):
             }
         """)
         event.accept()
+
+    def toggle_edit_mode(self):
+        parent = self.parent()
+        while parent and not isinstance(parent, ImageViewer):
+            parent = parent.parent()
+        if parent:
+            button = self.sender()
+            if button.isChecked():
+                parent.enter_edit_mode(self.waypoint)
+            else:
+                parent.exit_edit_mode()
 
 class MainWindow(QMainWindow):
     """メインウィンドウ
@@ -1618,6 +1819,9 @@ class MainWindow(QMainWindow):
         # パス生成時の処理を接続
         self.analysis_panel.generate_path_requested.connect(
             self.image_viewer.generate_path)
+
+        # ウェイポイント編集時の処理を接続
+        self.image_viewer.waypoint_edited.connect(self.analysis_panel.add_waypoint_to_list)
 
     def update_layer_panel(self):
         """レイヤーパネルの表示を更新"""
@@ -1719,3 +1923,4 @@ def main():
 
 if __name__ == '__main__':
     main()
+
