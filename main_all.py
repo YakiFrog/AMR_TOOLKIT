@@ -370,8 +370,16 @@ class DrawableLabel(QLabel):
                         if waypoint.attributes:
                             tooltip = "<b>Actions:</b><br>"
                             for key, value in waypoint.attributes.items():
-                                tooltip += f"{key}: {value} <br>"
-                            QToolTip.showText(event.globalPosition(), tooltip.strip())
+                                tooltip += f"{key}: {value}"
+                                # 最後の要素以外には改行を追加
+                                if key != list(waypoint.attributes.keys())[-1]:
+                                    tooltip += "<br>"
+                            # QPointFからQPointに変換
+                            global_pos = QPoint(
+                                int(event.globalPosition().x()),
+                                int(event.globalPosition().y())
+                            )
+                            QToolTip.showText(global_pos, tooltip.strip())
                             return
                 
                 QToolTip.hideText()
