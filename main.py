@@ -1594,40 +1594,84 @@ class WaypointListItem(QWidget):
         self.waypoint_number = waypoint.number
         self.waypoint = waypoint
         
-        # ドラッグ&ドロップを有効化
         self.setAcceptDrops(True)
         
         # レイアウト設定
         layout = QHBoxLayout(self)
-        layout.setContentsMargins(5, 2, 5, 2)
-        layout.setSpacing(5)
+        layout.setContentsMargins(4, 4, 4, 4)
+        layout.setSpacing(8)
         
-        # ドラッグハンドル（三本線）を追加
-        drag_handle = QLabel("⋮")  # 縦三点リーダー
-        drag_handle.setStyleSheet("""
-            QLabel {
-                font-size: 20px;
-                color: #666;
-                padding: 0 5px;
-                margin-right: 5px;
+        # カード風のフレーム
+        self.frame = QFrame()
+        self.frame.setFrameStyle(QFrame.Shape.StyledPanel)
+        self.frame.setStyleSheet("""
+            QFrame {
+                background-color: white;
+                border: 1px solid #e0e0e0;
+                border-radius: 4px;
+            }
+            QFrame:focus {
+                border: 1px solid #e0e0e0;
+                outline: none;
             }
         """)
         
-        # フレームを作成（ドラッグ時のハイライト用）
-        self.frame = QFrame()
-        self.frame.setFrameStyle(QFrame.Shape.NoFrame)
-        frame_layout = QHBoxLayout(self.frame) 
-        frame_layout.setContentsMargins(0, 0, 0, 0)
-        frame_layout.setSpacing(5)
+        # フレーム内のレイアウト
+        frame_layout = QHBoxLayout(self.frame)
+        frame_layout.setContentsMargins(8, 4, 8, 4)
+        frame_layout.setSpacing(12)
         
-        # ラベル
-        self.label = QLabel(waypoint.display_name)
-        self.label.setFocusPolicy(Qt.FocusPolicy.NoFocus) # フォーカスを無効化
-        self.label.setAttribute(Qt.WidgetAttribute.WA_TransparentForMouseEvents)
-        self.label.setStyleSheet("""
+        # ドラッグハンドル
+        drag_handle = QLabel("⋮")
+        drag_handle.setStyleSheet("""
             QLabel {
-                font-size: 14px;
-                font-weight: 500;
+                color: #9e9e9e;
+                font-size: 16px;
+                padding: 0 2px;
+            }
+        """)
+        
+        # ウェイポイント番号（青いバッジ風）
+        number_badge = QLabel(f"{waypoint.number:02d}")
+        number_badge.setStyleSheet("""
+            QLabel {
+                color: white;
+                background-color: #2196F3;
+                border-radius: 3px;
+                padding: 2px 6px;
+                font-size: 11px;
+                font-weight: bold;
+                text-align: center;
+            }
+        """)
+        number_badge.setFixedWidth(40) # 固定幅に設定
+        
+        # 座標情報（モノスペースフォントで整列）
+        coord_text = f"({waypoint.x:.2f}, {waypoint.y:.2f})"
+        coord_label = QLabel(coord_text)
+        coord_label.setStyleSheet("""
+            QLabel {
+                color: #424242;
+                font-size: 12px;
+            }
+            QLabel:focus {
+                font-weight: normal;
+            }
+        """)
+        
+        # 角度表示（丸いバッジ風）
+        degrees = int(waypoint.angle * 180 / np.pi)
+        angle_label = QLabel(f"{degrees}°")
+        angle_label.setStyleSheet("""
+            QLabel {
+                color: #666666;
+                background-color: #f5f5f5;
+                border-radius: 3px;
+                padding: 2px 6px;
+                font-size: 11px;
+                font-weight: bold;
+                min-width: 35px;
+                text-align: center;
             }
         """)
         
@@ -1636,40 +1680,54 @@ class WaypointListItem(QWidget):
         delete_button.setFixedSize(20, 20)
         delete_button.setStyleSheet("""
             QPushButton {
-                background-color: #ff6b6b;
-                color: white;
+                background-color: transparent;
+                color: #666666;
+                border: none;
                 border-radius: 10px;
                 font-weight: bold;
-                font-size: 12px;
+                font-size: 14px;
             }
             QPushButton:hover {
                 background-color: #ff5252;
+                color: white;
             }
         """)
         delete_button.clicked.connect(lambda: self.delete_clicked.emit(self.waypoint_number))
         
-        # フレームにウィジェットを追加（編集ボタンを削除）
-        frame_layout.addWidget(self.label, stretch=1)
+        # フレームにウィジェットを追加
+        frame_layout.addWidget(drag_handle)
+        frame_layout.addWidget(number_badge)
+        frame_layout.addWidget(coord_label, 1)  # 座標ラベルを伸縮可能に
+        frame_layout.addWidget(angle_label)
         frame_layout.addWidget(delete_button)
         
-        # メインレイアウトにウィジェットを追加
-        layout.addWidget(drag_handle) # ドラッグハンドルを先頭に追加
-        layout.addWidget(self.frame, stretch=1)
+        # メインレイアウトにフレームを追加
+        layout.addWidget(self.frame)
         
-        # スタイル設定
+        # ホバー効果とスペーシングのスタイルを修正
         self.setStyleSheet("""
             WaypointListItem {
-                border-bottom: 1px solid #eee;
-                background-color: white;
+                background-color: transparent;
+                margin: 1px 0;
             }
-            WaypointListItem:hover {
-                background-color: #f5f5f5;
+            WaypointListItem:hover QFrame {
+                border: 1px solid #2196F3;
+                background-color: #f8f9fa;
+            }
+            WaypointListItem:focus {
+                outline: none;
             }
         """)
+        
+        # フォーカスポリシーを設定
+        self.setFocusPolicy(Qt.FocusPolicy.NoFocus)
+        self.frame.setFocusPolicy(Qt.FocusPolicy.NoFocus)
+        coord_label.setFocusPolicy(Qt.FocusPolicy.NoFocus)
 
     def update_label(self, text):
         """ラベルテキストを更新"""
-        self.label.setText(text)
+        # 表示形式を保持するため、更新は行わない
+        pass
 
     def mousePressEvent(self, event):
         if not self.isVisible():  # Add check for widget visibility
@@ -1687,27 +1745,26 @@ class WaypointListItem(QWidget):
         super().mousePressEvent(event)
 
     def dragEnterEvent(self, event):
-        # ドラッグされたデータがテキストなら受け入れる
         if event.mimeData().hasText() and event.source() != self:
             event.accept()
-            self.label.setStyleSheet("""
-                QLabel {
-                    font-size: 14px;
-                    font-weight: 500;
-                    color: #2196F3;
+            # ドラッグ時のスタイル変更を抑制
+            self.frame.setStyleSheet("""
+                QFrame {
+                    background-color: #f8f9fa;
+                    border: 1px solid #2196F3;
+                    border-radius: 4px;
                 }
             """)
         else:
             event.ignore()
 
     def dragLeaveEvent(self, event):
-        # ドラッグが離れたら下線を消す
-        # self.frame.setFrameStyle(QFrame.Shape.NoFrame)
-        # self.frame.setStyleSheet("")
-        self.label.setStyleSheet("""
-            QLabel {
-                font-size: 14px;
-                font-weight: 500;
+        # ドラッグ離脱時のスタイルを元に戻す
+        self.frame.setStyleSheet("""
+            QFrame {
+                background-color: white;
+                border: 1px solid #e0e0e0;
+                border-radius: 4px;
             }
         """)
         super().dragLeaveEvent(event)
@@ -1919,3 +1976,4 @@ def main():
 
 if __name__ == '__main__':
     main()
+
