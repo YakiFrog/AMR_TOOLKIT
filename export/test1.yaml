@@ -1,0 +1,105 @@
+waypoints:
+- angle: !!python/object/apply:numpy._core.multiarray.scalar
+  - &id001 !!python/object/apply:numpy.dtype
+    args:
+    - f8
+    - false
+    - true
+    state: !!python/tuple
+    - 3
+    - <
+    - null
+    - null
+    - null
+    - -1
+    - -1
+    - 0
+  - !!binary |
+    eHCieMRPo78=
+  number: 1
+  x: 2.25
+  y: -0.75
+- angle: !!python/object/apply:numpy._core.multiarray.scalar
+  - *id001
+  - !!binary |
+    M49fEpIE0L8=
+  number: 2
+  x: 10.350000000000001
+  y: -1.9000000000000001
+- angle: !!python/object/apply:numpy._core.multiarray.scalar
+  - *id001
+  - !!binary |
+    piMdQeVswL8=
+  number: 3
+  x: 17.25
+  y: -3.7
+- angle: !!python/object/apply:numpy._core.multiarray.scalar
+  - *id001
+  - !!binary |
+    FWFogSg2578=
+  number: 4
+  x: 24.25
+  y: -5.7
+- angle: !!python/object/apply:numpy._core.multiarray.scalar
+  - *id001
+  - !!binary |
+    D5yo4HNgAcA=
+  number: 5
+  x: 29.400000000000002
+  y: -4.3500000000000005
+- angle: !!python/object/apply:numpy._core.multiarray.scalar
+  - *id001
+  - !!binary |
+    F4kM26knAcA=
+  number: 6
+  x: 24.85
+  y: -15.850000000000001
+- angle: !!python/object/apply:numpy._core.multiarray.scalar
+  - *id001
+  - !!binary |
+    mr94LaBy/b8=
+  number: 7
+  x: 23.450000000000003
+  y: -21.150000000000002
+- angle: !!python/object/apply:numpy._core.multiarray.scalar
+  - *id001
+  - !!binary |
+    oTImKUsUAMA=
+  number: 8
+  x: 19.0
+  y: -31.35
+- angle: !!python/object/apply:numpy._core.multiarray.scalar
+  - *id001
+  - !!binary |
+    UoiGthlr9D8=
+  number: 9
+  x: 16.400000000000002
+  y: -32.6
+- angle: !!python/object/apply:numpy._core.multiarray.scalar
+  - *id001
+  - !!binary |
+    2vcb4i9SB0A=
+  number: 10
+  x: 22.25
+  y: -19.200000000000003
+- angle: !!python/object/apply:numpy._core.multiarray.scalar
+  - *id001
+  - !!binary |
+    lWMG1urQ8j8=
+  number: 11
+  x: 5.300000000000001
+  y: -13.200000000000001
+- angle: !!python/object/apply:numpy._core.multiarray.scalar
+  - *id001
+  - !!binary |
+    nRIBmvFPBEA=
+  number: 12
+  x: 8.0
+  y: -6.75
+- angle: !!python/object/apply:numpy._core.multiarray.scalar
+  - *id001
+  - !!binary |
+    ugMF7xhCCEA=
+  number: 13
+  x: -0.2
+  y: -3.0

@@ -1145,6 +1145,26 @@ class ImageViewer(QWidget):
         self.pgm_display.editing_waypoint = None
         self.pgm_display.setCursor(Qt.CursorShape.ArrowCursor)
 
+    def get_combined_pixmap(self):
+        """全レイヤーを合成したピクスマップを取得"""
+        if not self.pgm_layer.pixmap:
+            return None
+
+        # 合成用の新しいピクスマップを作成
+        result = QPixmap(self.pgm_layer.pixmap.size())
+        result.fill(Qt.GlobalColor.white)
+        
+        painter = QPainter(result)
+        
+        # 全レイヤーを描画
+        for layer in self.layers:
+            if layer.visible and layer.pixmap:
+                painter.setOpacity(layer.opacity)
+                painter.drawPixmap(0, 0, layer.pixmap)
+        
+        painter.end()
+        return result
+
 class MenuPanel(QWidget):
     """メニューパネル
     ファイル操作とズーム制御のUIを提供"""
@@ -1332,6 +1352,7 @@ class RightPanel(QWidget):
     all_waypoints_delete_requested = Signal()  # 新しいシグナル
     waypoint_reorder_requested = Signal(int, int)  # 順序変更シグナルを追加
     generate_path_requested = Signal()  # パス生成用シグナル
+    export_requested = Signal(bool, bool)  # (export_pgm, export_waypoints)
     
     def __init__(self):
         super().__init__()
@@ -1352,36 +1373,35 @@ class RightPanel(QWidget):
         self.waypoint_widget = self.create_waypoint_panel()
         layout.addWidget(self.waypoint_widget)
         
-        # Panel 2, 3を追加
-        titles = ["Panel 2", "Panel 3"]
-        for title in titles:
-            widget = QWidget()
-            widget_layout = QVBoxLayout(widget)
-            
-            title_label = QLabel(title)
-            title_label.setStyleSheet("""
-                QLabel {
-                    font-size: 14px;
-                    font-weight: bold;
-                    padding: 5px;
-                    background-color: #e0e0e0;
-                    border-radius: 3px;
-                }
-            """)
-            
-            content = QWidget()
-            content.setStyleSheet("""
-                QWidget {
-                    background-color: white;
-                    border: 1px solid #ccc;
-                    border-radius: 3px;
-                }
-            """)
-            content.setMinimumHeight(150)
-            
-            widget_layout.addWidget(title_label)
-            widget_layout.addWidget(content)
-            layout.addWidget(widget)
+        # Panel 2を追加
+        widget = QWidget()
+        widget_layout = QVBoxLayout(widget)
+        title_label = QLabel("Panel 2")
+        title_label.setStyleSheet("""
+            QLabel {
+                font-size: 14px;
+                font-weight: bold;
+                padding: 5px;
+                background-color: #e0e0e0;
+                border-radius: 3px;
+            }
+        """)
+        content = QWidget()
+        content.setStyleSheet("""
+            QWidget {
+                background-color: white;
+                border: 1px solid #ccc;
+                border-radius: 3px;
+            }
+        """)
+        content.setMinimumHeight(150)
+        widget_layout.addWidget(title_label)
+        widget_layout.addWidget(content)
+        layout.addWidget(widget)
+        
+        # エクスポートパネルを追加
+        self.export_widget = self.create_export_panel()
+        layout.addWidget(self.export_widget)
 
         self.setLayout(layout)
 
@@ -1518,6 +1538,73 @@ class RightPanel(QWidget):
         layout.addWidget(self.scroll_area)
         
         return widget
+
+    def create_export_panel(self):
+        """エクスポートパネルを作成"""
+        widget = QWidget()
+        layout = QVBoxLayout(widget)
+        
+        # タイトル
+        title_label = QLabel("Export")
+        title_label.setStyleSheet("""
+            QLabel {
+                font-size: 14px;
+                font-weight: bold;
+                padding: 5px;
+                background-color: #e0e0e0;
+                border-radius: 3px;
+            }
+        """)
+        
+        # コンテンツエリア
+        content = QWidget()
+        content.setStyleSheet("""
+            QWidget {
+                background-color: white;
+                border: 1px solid #ccc;
+                border-radius: 3px;
+                padding: 10px;
+            }
+        """)
+        content_layout = QVBoxLayout(content)
+        
+        # チェックボックス
+        self.export_pgm_cb = QCheckBox("Export PGM with drawings")
+        self.export_waypoints_cb = QCheckBox("Export Waypoints YAML")
+        
+        # エクスポートボタン
+        export_button = QPushButton("Export Selected")
+        export_button.setStyleSheet("""
+            QPushButton {
+                background-color: #4CAF50;
+                color: white;
+                border-radius: 3px;
+                padding: 8px;
+                font-size: 12px;
+                min-width: 100px;
+            }
+            QPushButton:hover {
+                background-color: #45a049;
+            }
+        """)
+        export_button.clicked.connect(self.handle_export)
+        
+        # レイアウトに追加
+        content_layout.addWidget(self.export_pgm_cb)
+        content_layout.addWidget(self.export_waypoints_cb)
+        content_layout.addWidget(export_button, alignment=Qt.AlignmentFlag.AlignCenter)
+        
+        layout.addWidget(title_label)
+        layout.addWidget(content)
+        
+        return widget
+
+    def handle_export(self):
+        """エクスポートボタンクリック時の処理"""
+        export_pgm = self.export_pgm_cb.isChecked()
+        export_waypoints = self.export_waypoints_cb.isChecked()
+        if export_pgm or export_waypoints:
+            self.export_requested.emit(export_pgm, export_waypoints)
 
     # スクロールタイマーの設定用メソッドを追加
     def start_auto_scroll(self):
@@ -2001,6 +2088,9 @@ class MainWindow(QMainWindow):
         # ウェイポイント編集時の処理を接続
         self.image_viewer.waypoint_edited.connect(self.analysis_panel.add_waypoint_to_list)
 
+        # エクスポート時の処理を接続
+        self.analysis_panel.export_requested.connect(self.handle_export)
+
     def update_layer_panel(self):
         """レイヤーパネルの表示を更新"""
         if hasattr(self, 'analysis_panel') and hasattr(self, 'image_viewer'):
@@ -2091,6 +2181,55 @@ class MainWindow(QMainWindow):
             print(f"Error loading YAML file: {str(e)}")
             import traceback
             traceback.print_exc()
+
+    def handle_export(self, export_pgm, export_waypoints):
+        """エクスポート処理"""
+        if export_pgm:
+            self.export_pgm_with_drawings()
+        if export_waypoints:
+            self.export_waypoints_yaml()
+
+    def export_pgm_with_drawings(self):
+        """描画込みのPGMファイルをエクスポート"""
+        file_name, _ = QFileDialog.getSaveFileName(
+            self,
+            "Export PGM with drawings",
+            "",
+            "PGM Files (*.pgm);;All Files (*)"
+        )
+        if file_name:
+            # ImageViewerの現在の表示内容をPGMとして保存
+            pixmap = self.image_viewer.get_combined_pixmap()
+            if pixmap:
+                image = pixmap.toImage()
+                # グレースケールに変換して保存
+                gray_image = image.convertToFormat(QImage.Format.Format_Grayscale8)
+                gray_image.save(file_name, "PGM")
+
+    def export_waypoints_yaml(self):
+        """ウェイポイントをYAMLファイルとしてエクスポート"""
+        file_name, _ = QFileDialog.getSaveFileName(
+            self,
+            "Export Waypoints YAML",
+            "",
+            "YAML Files (*.yaml);;All Files (*)"
+        )
+        if file_name:
+            waypoints_data = []
+            for wp in self.image_viewer.waypoints:
+                waypoints_data.append({
+                    'number': wp.number,
+                    'x': wp.x,
+                    'y': wp.y,
+                    'angle': wp.angle
+                })
+            
+            data = {'waypoints': waypoints_data}
+            try:
+                with open(file_name, 'w') as f:
+                    yaml.dump(data, f, default_flow_style=False)
+            except Exception as e:
+                print(f"Error saving waypoints YAML: {str(e)}")
 
 def main():
     """アプリケーションのメインエントリーポイント"""
