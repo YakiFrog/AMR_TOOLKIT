@@ -1,0 +1,8 @@
+format:
+  angle_degrees: float
+  angle_radians: float
+  number: int
+  velocity: float
+  x: float
+  y: float
+version: '1.0'

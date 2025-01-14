@@ -5,7 +5,7 @@ import yaml  # PyYAMLをインポート
 from PySide6.QtWidgets import (QApplication, QMainWindow, QWidget, QVBoxLayout, 
                               QHBoxLayout, QMenuBar, QMenu, QLabel, QPushButton,
                               QFileDialog, QScrollArea, QSplitter, QGesture, 
-                              QPinchGesture, QSlider, QCheckBox, QFrame, QTextEdit, QMessageBox)
+                              QPinchGesture, QSlider, QCheckBox, QFrame, QTextEdit, QMessageBox, QDialog, QLineEdit)
 from PySide6.QtCore import Qt, QPoint, Signal, QEvent, QSize, QMimeData, QTimer
 from PySide6.QtGui import (QPixmap, QImage, QWheelEvent, QPainter, QPen, QCursor,
                           QDrag, QColor)  # QDragをQtGuiからインポート
@@ -70,6 +70,7 @@ class Waypoint:
         self.name = name if name else f"Waypoint {self.number}"
         self.resolution = 0.05  # 解像度を保存
         self.update_display_name()
+        self.attributes = {}  # 属性を保存するディクショナリを追加
 
     def set_angle(self, angle):
         """角度を設定し、表示名を更新"""
@@ -110,6 +111,14 @@ class Waypoint:
         if hasattr(self, '_origin_x') and hasattr(self, '_origin_y'):
             # 既存の原点情報がある場合は座標を更新
             self.update_metric_coordinates(self._origin_x, self._origin_y, self.resolution)
+
+    def set_attribute(self, key, value):
+        """属性を設定"""
+        self.attributes[key] = value
+    
+    def get_attribute(self, key, default=None):
+        """属性を取得"""
+        return self.attributes.get(key, default)
 
 class CustomScrollArea(QScrollArea):
     """カスタムスクロールエリアクラス
@@ -401,6 +410,34 @@ class DrawableLabel(QLabel):
                 self.parent_viewer.waypoint_edited.emit(self.editing_waypoint)
         else:
             super().mouseReleaseEvent(event)
+
+    def contextMenuEvent(self, event):
+        """右クリックメニューの表示"""
+        if not self.parent_viewer:
+            return
+
+        # クリックされた位置のウェイポイントを探す
+        pos = event.pos()
+        pixmap_geometry = self.geometry()
+        if self.parent_viewer.drawing_layer.pixmap:
+            scale_x = self.parent_viewer.drawing_layer.pixmap.width() / pixmap_geometry.width()
+            scale_y = self.parent_viewer.drawing_layer.pixmap.height() / pixmap_geometry.height()
+            x = int(pos.x() * scale_x)
+            y = int(pos.y() * scale_y)
+            
+            for waypoint in self.parent_viewer.waypoints:
+                if abs(waypoint.pixel_x - x) < 15 and abs(waypoint.pixel_y - y) < 15:
+                    menu = QMenu(self)
+                    edit_action = menu.addAction("Add Action") 
+                    action = menu.exec(event.globalPos())
+                    
+                    if action == edit_action:
+                        dialog = AttributeDialog(waypoint, format_manager.get_format(), self)
+                        if dialog.exec() == QDialog.DialogCode.Accepted:
+                            waypoint.attributes = dialog.get_attributes()
+                            if self.parent_viewer:
+                                self.parent_viewer.waypoint_edited.emit(waypoint)
+                    break
 
 class Layer(QWidget):  # QObjectを継承してシグナルを使用可能に
     """レイヤークラス"""
@@ -1221,6 +1258,11 @@ class ImageViewer(QWidget):
                     waypoint = Waypoint(pixel_x, pixel_y, angle)
                     waypoint.update_metric_coordinates(origin_x, origin_y, self.resolution)
                     
+                    # 追加の属性をインポート
+                    for key, value in wp_data.items():
+                        if key not in ['number', 'x', 'y', 'angle_degrees', 'angle_radians']:
+                            waypoint.set_attribute(key, value)
+                    
                     self.waypoints.append(waypoint)
                     self.waypoint_added.emit(waypoint)
             except KeyError as e:
@@ -1549,7 +1591,7 @@ class RightPanel(QWidget):
         import_button.setToolTip("Import Waypoints from YAML")
         import_button.setStyleSheet("""
             QPushButton {
-                background-color: #2196F3;
+                background-color: #F44336;
                 color: white;
                 border-radius: 3px;
                 padding: 5px 10px;
@@ -1557,7 +1599,7 @@ class RightPanel(QWidget):
                 min-width: 60px;
             }
             QPushButton:hover {
-                background-color: #1976D2;
+                background-color: #D32F2F;
             }
         """)
         import_button.clicked.connect(self.handle_import_waypoints)
@@ -2331,11 +2373,24 @@ class MainWindow(QMainWindow):
             current_format = format_manager.get_format()
             
             for wp in self.image_viewer.waypoints:
+                # 基本属性を取得
                 waypoint_data = {
                     key: self.get_waypoint_value(wp, key, type_info)
                     for key, type_info in current_format['format'].items()
                     if self.get_waypoint_value(wp, key, type_info) is not None
                 }
+                
+                # カスタム属性を追加
+                for key, value in wp.attributes.items():
+                    if key in current_format['format']:
+                        try:
+                            # フォーマットに従って型変換を試みる
+                            converted_value = self.convert_value(value, current_format['format'][key])
+                            waypoint_data[key] = converted_value
+                        except:
+                            # 変換に失敗した場合は文字列のまま保存
+                            waypoint_data[key] = value
+                
                 waypoints_data.append(waypoint_data)
             
             data = {
@@ -2498,10 +2553,44 @@ class FormatEditorPanel(QWidget):
             }
         """)
         reset_button.clicked.connect(self.reset_to_default)
+        
+        # エクスポートボタン
+        export_button = QPushButton("Export Format")
+        export_button.setStyleSheet("""
+            QPushButton {
+                background-color: #4CAF50;
+                color: white;
+                padding: 5px 10px;
+                border-radius: 3px;
+                min-width: 100px;
+            }
+            QPushButton:hover {
+                background-color: #388E3C;
+            }
+        """)
+        export_button.clicked.connect(self.export_format)
+        
+        # インポートボタン
+        import_button = QPushButton("Import Format")
+        import_button.setStyleSheet("""
+            QPushButton {
+                background-color: #F44336;
+                color: white;
+                padding: 5px 10px;
+                border-radius: 3px;
+                min-width: 100px;
+            }
+            QPushButton:hover {
+                background-color: #D32F2F;
+            }
+        """)
+        import_button.clicked.connect(self.import_format)
 
         # ボタンをレイアウトに追加
         button_layout.addWidget(update_button)
         button_layout.addWidget(reset_button)
+        button_layout.addWidget(export_button)
+        button_layout.addWidget(import_button)
         
         # コンテンツレイアウトに要素を追加
         content_layout.addWidget(self.editor)
@@ -2541,9 +2630,109 @@ class FormatEditorPanel(QWidget):
             QMessageBox.information(self, "Success", "Format updated successfully")
         except Exception as e:
             QMessageBox.warning(self, "Error", f"Invalid format: {str(e)}")
+            
+    def export_format(self):
+        """フォーマットをYAMLファイルとしてエクスポート"""
+        file_name, _ = QFileDialog.getSaveFileName(
+            self,
+            "Export Format",
+            "",
+            "YAML Files (*.yaml);;All Files (*)"
+        )
+        if file_name:
+            try:
+                with open(file_name, 'w') as f:
+                    f.write(self.editor.toPlainText())
+                QMessageBox.information(self, "Success", "Format exported successfully")
+            except Exception as e:
+                QMessageBox.warning(self, "Error", f"Error exporting format: {str(e)}")
+                
+    def import_format(self):
+        """フォーマットをYAMLファイルからインポート"""
+        file_name, _ = QFileDialog.getOpenFileName(
+            self,
+            "Import Format",
+            "",
+            "YAML Files (*.yaml);;All Files (*)"
+        )
+        if file_name:
+            try:
+                with open(file_name, 'r') as f:
+                    new_format = yaml.safe_load(f)
+                format_manager.set_format(new_format)
+                self.show_current_format()
+                QMessageBox.information(self, "Success", "Format imported successfully")
+            except Exception as e:
+                QMessageBox.warning(self, "Error", f"Error importing format: {str(e)}")
 
     def on_format_changed(self, new_format):
         self.show_current_format()
+
+class AttributeDialog(QDialog):
+    def __init__(self, waypoint, format_data, parent=None):
+        super().__init__(parent)
+        self.waypoint = waypoint
+        self.format_data = format_data
+        self.setup_ui()
+        
+    def setup_ui(self):
+        self.setWindowTitle("Edit Attributes")
+        layout = QVBoxLayout(self)
+        
+        # 属性リスト
+        self.attribute_list = QWidget()
+        self.attribute_layout = QVBoxLayout(self.attribute_list)
+        
+        # フォーマットから利用可能な属性を取得
+        available_attrs = [key for key in self.format_data['format'].keys()
+                         if key not in ['number', 'x', 'y', 'angle_degrees', 'angle_radians']]
+        
+        # 既存の属性を表示
+        for key in available_attrs:
+            self.add_attribute_row(key, self.waypoint.get_attribute(key, ""))
+        
+        scroll = QScrollArea()
+        scroll.setWidget(self.attribute_list)
+        scroll.setWidgetResizable(True)
+        layout.addWidget(scroll)
+        
+        # ボタン
+        button_layout = QHBoxLayout()
+        ok_button = QPushButton("OK")
+        ok_button.clicked.connect(self.accept)
+        cancel_button = QPushButton("Cancel")
+        cancel_button.clicked.connect(self.reject)
+        button_layout.addWidget(ok_button)
+        button_layout.addWidget(cancel_button)
+        layout.addLayout(button_layout)
+    
+    def add_attribute_row(self, key, value):
+        """属性入力行を追加"""
+        row = QHBoxLayout()
+        
+        # キーのラベル
+        key_label = QLabel(key)
+        key_label.setMinimumWidth(100)
+        
+        # 値の入力フィールド
+        value_edit = QLineEdit(str(value))
+        value_edit.setProperty('key', key)  # キーを保存
+        
+        row.addWidget(key_label)
+        row.addWidget(value_edit)
+        self.attribute_layout.addLayout(row)
+    
+    def get_attributes(self):
+        """ダイアログから属性を取得"""
+        attributes = {}
+        for i in range(self.attribute_layout.count()):
+            layout_item = self.attribute_layout.itemAt(i)
+            if layout_item and isinstance(layout_item, QHBoxLayout):
+                value_edit = layout_item.itemAt(1).widget()
+                if value_edit and value_edit.text():  # 空でない値のみ保存
+                    key = value_edit.property('key')
+                    attributes[key] = value_edit.text()
+        return attributes
 
 def main():
     """アプリケーションのメインエントリーポイント"""

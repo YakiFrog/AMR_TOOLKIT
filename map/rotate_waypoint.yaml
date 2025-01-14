@@ -1,0 +1,23 @@
+format_version: '1.0'
+waypoints:
+- angle_degrees: 25.159301916031655
+  angle_radians: 0.4391126559380703
+  number: 1
+  x: 2.85
+  y: 0.45
+- angle_degrees: 4.763641690726179
+  angle_radians: 0.08314123188844125
+  number: 2
+  x: 8.200000000000001
+  y: 3.3000000000000003
+  rotate: 90
+- angle_degrees: 5.194428907734806
+  angle_radians: 0.09065988720074511
+  number: 3
+  x: 13.450000000000001
+  y: 3.75
+- angle_degrees: 0.0
+  angle_radians: 0.0
+  number: 4
+  x: 18.900000000000002
+  y: 3.5500000000000003
