@@ -1,26 +1,16 @@
 waypoints:
 - number: 1
-  x: -19.150000000000002
-  y: 3.6
-  angle_degrees: -58.671307132195835
-  angle_radians: -1.0240074859056494
-- number: 2
-  x: -22.950000000000003
-  y: -1.05
-  angle_degrees: -4.085616779974877
-  angle_radians: -0.07130746478529032
-- number: 3
-  x: -26.35
-  y: -3.0
+  x: -1.25
+  y: 10.200000000000001
   angle_degrees: 0.0
   angle_radians: 0.0
-- number: 4
-  x: -27.3
-  y: 1.6
-  angle_degrees: -58.05002855366685
-  angle_radians: -1.0131641291382083
-- number: 5
-  x: -21.900000000000002
-  y: -8.6
-  angle_degrees: 7.125016348901798
-  angle_radians: 0.12435499454676144
+- number: 2
+  x: 1.1500000000000001
+  y: 7.0
+  angle_degrees: -2.1610794882263713
+  angle_radians: -0.03771795246686421
+- number: 3
+  x: 5.45
+  y: 7.4
+  angle_degrees: 0.0
+  angle_radians: 0.0

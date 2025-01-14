@@ -259,10 +259,10 @@ class DrawableLabel(QLabel):
 
     def mouseDoubleClickEvent(self, event):
         """ウェイポイントをダブルクリックして編集モードの切り替え"""
-        if not self.parent_viewer:
+        if not self.parent_viewer or self.parent_viewer.drawing_mode != DrawingMode.NONE:
             return
             
-        pos = event.position().toPoint()  # 修正
+        pos = event.position().toPoint()
         pixmap_geometry = self.geometry()
         if self.parent_viewer.drawing_layer.pixmap:
             scale_x = self.parent_viewer.drawing_layer.pixmap.width() / pixmap_geometry.width()
@@ -464,8 +464,13 @@ class ImageViewer(QWidget):
         self.waypoint_layer = Layer("Waypoint Layer")
         self.origin_layer = Layer("Origin Layer")
         self.path_layer = Layer("Path Layer")
-        self.layers = [self.pgm_layer, self.drawing_layer, self.path_layer, 
-                      self.waypoint_layer, self.origin_layer]
+        self.layers = [
+            self.pgm_layer,       # 1. PGM画像（最下層）
+            self.drawing_layer,   # 2. ペンと消しゴムの描画
+            self.path_layer,      # 3. パス
+            self.waypoint_layer,  # 4. ウェイポイント
+            self.origin_layer     # 5. 原点（最上層）
+        ]
         self.active_layer = self.drawing_layer
         
         for layer in self.layers:
@@ -814,28 +819,35 @@ class ImageViewer(QWidget):
         
         painter = QPainter(result)
         
-        # PGMレイヤーを描画
+        # 1. PGMレイヤーを描画（最下層）
         if self.pgm_layer.visible and self.pgm_layer.pixmap:
             painter.setOpacity(self.pgm_layer.opacity)
             painter.drawPixmap(0, 0, self.pgm_layer.pixmap)
 
-        # グリッドの描画
+        # 2. グリッドの描画
         if self.show_grid:
-            painter.setOpacity(0.3)  # グリッドの透明度
+            painter.setOpacity(0.3)
             pen = QPen(Qt.GlobalColor.gray)
-            pen.setStyle(Qt.PenStyle.DashLine)  # 破線スタイル
+            pen.setStyle(Qt.PenStyle.DashLine)
             painter.setPen(pen)
-
-            # 縦線を描画
+            
             for x in range(0, result.width(), self.grid_size):
                 painter.drawLine(x, 0, x, result.height())
-
-            # 横線を描画
             for y in range(0, result.height(), self.grid_size):
                 painter.drawLine(0, y, result.width(), y)
 
-        # ウェイポイントの描画（Waypointレイヤーの表示状態とopacityを考慮）
-        if (self.waypoints and self.waypoint_layer.visible):
+        # 3. 描画レイヤーを描画
+        if self.drawing_layer.visible and self.drawing_layer.pixmap:
+            painter.setOpacity(self.drawing_layer.opacity)
+            painter.drawPixmap(0, 0, self.drawing_layer.pixmap)
+
+        # 4. パスレイヤーを描画
+        if self.path_layer.visible and self.path_layer.pixmap:
+            painter.setOpacity(self.path_layer.opacity)
+            painter.drawPixmap(0, 0, self.path_layer.pixmap)
+
+        # 5. ウェイポイントレイヤーを描画
+        if self.waypoints and self.waypoint_layer.visible:
             painter.setOpacity(self.waypoint_layer.opacity)
             painter.setRenderHint(QPainter.RenderHint.Antialiasing)
             
@@ -896,12 +908,10 @@ class ImageViewer(QWidget):
                 text_y = y + text_height // 3
                 painter.drawText(text_x, text_y, number_text)
 
-        # 残りのレイヤーを描画
-        painter.setOpacity(1.0)  # 不透明度をリセット
-        for layer in self.layers[1:]:  # PGMレイヤー以外を描画
-            if (layer.visible and layer.pixmap):
-                painter.setOpacity(layer.opacity)
-                painter.drawPixmap(0, 0, layer.pixmap)
+        # 6. 原点レイヤーを描画（最上層）
+        if self.origin_layer.visible and self.origin_layer.pixmap:
+            painter.setOpacity(self.origin_layer.opacity)
+            painter.drawPixmap(0, 0, self.origin_layer.pixmap)
         
         painter.end()
 
