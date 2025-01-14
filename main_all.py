@@ -5,8 +5,7 @@ import yaml  # PyYAMLをインポート
 from PySide6.QtWidgets import (QApplication, QMainWindow, QWidget, QVBoxLayout, 
                               QHBoxLayout, QMenuBar, QMenu, QLabel, QPushButton,
                               QFileDialog, QScrollArea, QSplitter, QGesture, 
-                              QPinchGesture, QSlider, QCheckBox, QFrame, QTextEdit, 
-                              QMessageBox, QLineEdit, QComboBox)
+                              QPinchGesture, QSlider, QCheckBox, QFrame, QTextEdit, QMessageBox)
 from PySide6.QtCore import Qt, QPoint, Signal, QEvent, QSize, QMimeData, QTimer
 from PySide6.QtGui import (QPixmap, QImage, QWheelEvent, QPainter, QPen, QCursor,
                           QDrag, QColor)  # QDragをQtGuiからインポート
@@ -2386,16 +2385,6 @@ format_manager = FormatManager()
 
 class FormatEditorPanel(QWidget):
     format_updated = Signal(dict)  # フォーマット更新時のシグナル
-    DEFAULT_FORMAT = {
-        'version': '1.0',
-        'format': {
-            'number': 'int',
-            'x': 'float',
-            'y': 'float',
-            'angle_degrees': 'float',
-            'angle_radians': 'float'
-        }
-    }
 
     def __init__(self):
         super().__init__()
@@ -2404,32 +2393,7 @@ class FormatEditorPanel(QWidget):
 
     def setup_ui(self):
         layout = QVBoxLayout(self)
-        self.setStyleSheet("""
-            FormatEditorPanel {
-                background-color: #f5f5f5;
-                border-radius: 5px;
-                padding: 5px;
-            }
-            QFrame {
-                background-color: white;
-                border: 1px solid #ccc;
-                border-radius: 3px;
-            }
-            QLabel {
-                color: #333;
-            }
-            QPushButton {
-                padding: 5px 10px;
-                border-radius: 3px;
-            }
-            QLineEdit {
-                padding: 5px;
-                border: 1px solid #ddd;
-                border-radius: 3px;
-                background-color: white;
-            }
-        """)
-
+        
         # タイトル
         title_label = QLabel("Format Editor")
         title_label.setStyleSheet("""
@@ -2442,54 +2406,17 @@ class FormatEditorPanel(QWidget):
             }
         """)
 
-        # メインコンテンツエリア
-        content_frame = QFrame()
-        content_layout = QVBoxLayout(content_frame)
-
-        # バージョン入力
-        version_layout = QHBoxLayout()
-        version_label = QLabel("Version:")
-        self.version_input = QLineEdit()
-        version_layout.addWidget(version_label)
-        version_layout.addWidget(self.version_input)
-        content_layout.addLayout(version_layout)
-
-        # フォーマット編集エリア
-        format_label = QLabel("Format Fields:")
-        content_layout.addWidget(format_label)
-
-        # フィールドリストを表示するウィジェット
-        self.fields_widget = QWidget()
-        self.fields_layout = QVBoxLayout(self.fields_widget)
-        
-        # スクロールエリアの設定
-        scroll_area = QScrollArea()
-        scroll_area.setWidget(self.fields_widget)
-        scroll_area.setWidgetResizable(True)
-        scroll_area.setStyleSheet("""
-            QScrollArea {
-                border: 1px solid #ccc;
+        # 編集エリア
+        self.editor = QTextEdit()
+        self.editor.setStyleSheet("""
+            QTextEdit {
+                font-family: monospace;
                 background-color: white;
+                border: 1px solid #ccc;
+                border-radius: 3px;
+                padding: 5px;
             }
         """)
-        content_layout.addWidget(scroll_area)
-
-        # フィールド追加ボタン
-        add_field_button = QPushButton("Add Field")
-        add_field_button.setStyleSheet("""
-            QPushButton {
-                background-color: #4CAF50;
-                color: white;
-            }
-            QPushButton:hover {
-                background-color: #45a049;
-            }
-        """)
-        add_field_button.clicked.connect(self.add_field)
-        content_layout.addWidget(add_field_button)
-
-        # ボタンレイアウト
-        button_layout = QHBoxLayout()
         
         # 更新ボタン
         update_button = QPushButton("Update Format")
@@ -2497,126 +2424,42 @@ class FormatEditorPanel(QWidget):
             QPushButton {
                 background-color: #2196F3;
                 color: white;
+                padding: 5px 10px;
+                border-radius: 3px;
             }
             QPushButton:hover {
                 background-color: #1976D2;
             }
         """)
         update_button.clicked.connect(self.update_format)
-        
-        # リセットボタン
-        reset_button = QPushButton("Reset to Default")
-        reset_button.setStyleSheet("""
-            QPushButton {
-                background-color: #f44336;
-                color: white;
-            }
-            QPushButton:hover {
-                background-color: #da190b;
-            }
-        """)
-        reset_button.clicked.connect(self.reset_to_default)
-
-        button_layout.addWidget(update_button)
-        button_layout.addWidget(reset_button)
 
         layout.addWidget(title_label)
-        layout.addWidget(content_frame)
-        layout.addLayout(button_layout)
+        layout.addWidget(self.editor)
+        layout.addWidget(update_button)
 
         # 初期フォーマットを表示
         self.show_current_format()
 
-    def create_field_widget(self, name="", type_="int"):
-        field_widget = QFrame()
-        field_layout = QHBoxLayout(field_widget)
-        
-        # フィールド名入力
-        name_input = QLineEdit(name)
-        name_input.setPlaceholderText("Field name")
-        
-        # タイプ選択コンボボックス
-        type_combo = QComboBox()
-        type_combo.addItems(["int", "float", "string"])
-        type_combo.setCurrentText(type_)
-        
-        # 削除ボタン
-        delete_button = QPushButton("×")
-        delete_button.setFixedSize(25, 25)
-        delete_button.setStyleSheet("""
-            QPushButton {
-                background-color: #ff6b6b;
-                color: white;
-                border-radius: 12px;
-                font-weight: bold;
-            }
-            QPushButton:hover {
-                background-color: #ff5252;
-            }
-        """)
-        delete_button.clicked.connect(lambda: field_widget.deleteLater())
-        
-        field_layout.addWidget(name_input)
-        field_layout.addWidget(type_combo)
-        field_layout.addWidget(delete_button)
-        
-        return field_widget
-
-    def add_field(self):
-        self.fields_layout.addWidget(self.create_field_widget())
-
     def show_current_format(self):
-        format_data = format_manager.get_format()
-        
-        # バージョンを設定
-        self.version_input.setText(format_data['version'])
-        
-        # 既存のフィールドをクリア
-        while self.fields_layout.count():
-            widget = self.fields_layout.takeAt(0).widget()
-            if widget:
-                widget.deleteLater()
-        
-        # フィールドを追加
-        for name, type_ in format_data['format'].items():
-            self.fields_layout.addWidget(self.create_field_widget(name, type_))
+        format_text = yaml.dump(format_manager.get_format(), default_flow_style=False)
+        self.editor.setText(format_text)
 
     def update_format(self):
         try:
-            new_format = {
-                'version': self.version_input.text(),
-                'format': {}
-            }
-            
-            # 各フィールドウィジェットから情報を収集
-            for i in range(self.fields_layout.count()):
-                field_widget = self.fields_layout.itemAt(i).widget()
-                if field_widget:
-                    name_input = field_widget.findChild(QLineEdit)
-                    type_combo = field_widget.findChild(QComboBox)
-                    if name_input and type_combo and name_input.text():
-                        new_format['format'][name_input.text()] = type_combo.currentText()
+            # テキストをYAMLとしてパース
+            new_format = yaml.safe_load(self.editor.toPlainText())
+            # 必要なキーの存在チェック
+            if 'version' not in new_format or 'format' not in new_format:
+                raise ValueError("Format must contain 'version' and 'format' keys")
             
             # フォーマットを更新
             format_manager.set_format(new_format)
             self.format_updated.emit(new_format)
             
+            # 成功メッセージを表示
             QMessageBox.information(self, "Success", "Format updated successfully")
         except Exception as e:
             QMessageBox.warning(self, "Error", f"Invalid format: {str(e)}")
-
-    def reset_to_default(self):
-        """デフォルトのフォーマットに戻す"""
-        response = QMessageBox.question(
-            self,
-            "Reset Format",
-            "Are you sure you want to reset to default format?",
-            QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No
-        )
-        
-        if response == QMessageBox.StandardButton.Yes:
-            format_manager.set_format(self.DEFAULT_FORMAT)
-            self.show_current_format()
 
     def on_format_changed(self, new_format):
         self.show_current_format()

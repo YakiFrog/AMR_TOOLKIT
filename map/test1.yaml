@@ -1,87 +1,87 @@
 format_version: '1.0'
 waypoints:
-- number: 1
+- angle_degrees: 0.0
+  angle_radians: 0.0
+  number: 1
   x: 5.0
   y: -1.0
-  angle_degrees: 0.0
-  angle_radians: 0.0
-- number: 2
+- angle_degrees: -10.53918372862823
+  angle_radians: -0.18394345653717517
+  number: 2
   x: 11.850000000000001
   y: -1.9000000000000001
-  angle_degrees: -10.53918372862823
-  angle_radians: -0.18394345653717517
-- number: 3
+- angle_degrees: -14.036243467926477
+  angle_radians: -0.24497866312686412
+  number: 3
   x: 19.150000000000002
   y: -3.85
-  angle_degrees: -14.036243467926477
-  angle_radians: -0.24497866312686414
-- number: 4
+- angle_degrees: 52.59464336859145
+  angle_radians: 0.9179496956941223
+  number: 4
   x: 25.700000000000003
   y: -6.800000000000001
-  angle_degrees: 52.59464336859145
-  angle_radians: 0.9179496956941223
-- number: 5
+- angle_degrees: -112.16634582208246
+  angle_radians: -1.9576720445259248
+  number: 5
   x: 29.450000000000003
   y: -4.800000000000001
-  angle_degrees: -112.16634582208246
-  angle_radians: -1.9576720445259248
-- number: 6
+- angle_degrees: -114.30454926593671
+  angle_radians: -1.994990734698663
+  number: 6
   x: 24.1
   y: -16.75
-  angle_degrees: -114.30454926593671
-  angle_radians: -1.9949907346986633
-- number: 7
+- angle_degrees: -109.98310652189998
+  angle_radians: -1.9195673303788037
+  number: 7
   x: 18.25
   y: -31.400000000000002
-  angle_degrees: -109.98310652189998
-  angle_radians: -1.9195673303788037
-- number: 8
+- angle_degrees: -90.0
+  angle_radians: -1.5707963267948966
+  number: 8
   x: 16.0
   y: -38.900000000000006
-  angle_degrees: -90.0
-  angle_radians: -1.5707963267948966
-- number: 9
+- angle_degrees: 162.12130340415865
+  angle_radians: 2.82955053202726
+  number: 9
   x: 14.15
   y: -41.5
-  angle_degrees: 162.12130340415865
-  angle_radians: 2.82955053202726
-- number: 10
+- angle_degrees: 19.536654938128386
+  angle_radians: 0.3409789534963494
+  number: 10
   x: 13.100000000000001
   y: -38.45
-  angle_degrees: 19.536654938128386
-  angle_radians: 0.3409789534963494
-- number: 11
+- angle_degrees: 69.22774531795417
+  angle_radians: 1.208252089530389
+  number: 11
   x: 19.0
   y: -29.650000000000002
-  angle_degrees: 69.22774531795417
-  angle_radians: 1.208252089530389
-- number: 12
+- angle_degrees: 160.1678701497816
+  angle_radians: 2.7954566900204325
+  number: 12
   x: 22.85
   y: -20.150000000000002
-  angle_degrees: 160.1678701497816
-  angle_radians: 2.7954566900204325
-- number: 13
+- angle_degrees: 158.19859051364818
+  angle_radians: 2.761086276477428
+  number: 13
   x: 10.05
   y: -16.400000000000002
-  angle_degrees: 158.19859051364818
-  angle_radians: 2.761086276477428
-- number: 14
+- angle_degrees: 68.62937773065681
+  angle_radians: 1.1978086049948355
+  number: 14
   x: 4.7
   y: -14.65
-  angle_degrees: 68.62937773065681
-  angle_radians: 1.1978086049948355
-- number: 15
+- angle_degrees: 162.12130340415865
+  angle_radians: 2.82955053202726
+  number: 15
   x: 7.4
   y: -6.95
-  angle_degrees: 162.12130340415865
-  angle_radians: 2.82955053202726
-- number: 16
+- angle_degrees: 160.11483488614456
+  angle_radians: 2.7945310500503027
+  number: 16
   x: -3.1
   y: -3.0
-  angle_degrees: 160.11483488614456
-  angle_radians: 2.7945310500503027
-- number: 17
+- angle_degrees: 158.83874018317172
+  angle_radians: 2.7722589959161676
+  number: 17
   x: -7.65
   y: -1.9500000000000002
-  angle_degrees: 158.83874018317172
-  angle_radians: 2.7722589959161676
