@@ -2288,6 +2288,35 @@ class MainWindow(QMainWindow):
                 # グレースケールに変換して保存
                 gray_image = image.convertToFormat(QImage.Format.Format_Grayscale8)
                 gray_image.save(file_name, "PGM")
+                
+    def convert_value(self, value, type_info):
+        """値を指定された型に変換する"""
+        type_converters = {
+            'int': int,
+            'float': float,
+            'str': str,
+            'bool': bool
+        }
+        try:
+            if type_info in type_converters:
+                return type_converters[type_info](value)
+            return value
+        except (ValueError, TypeError):
+            return value
+        
+    def get_waypoint_value(self, waypoint, key, type_info):
+        """ウェイポイントの値を取得して型変換する"""
+        value_map = {
+            'number': lambda wp: wp.number,
+            'x': lambda wp: wp.x,
+            'y': lambda wp: wp.y,
+            'angle_degrees': lambda wp: wp.angle * 180 / np.pi,
+            'angle_radians': lambda wp: wp.angle
+        }
+        if key in value_map:
+            raw_value = value_map[key](waypoint)
+            return self.convert_value(raw_value, type_info)
+        return None
 
     def export_waypoints_yaml(self):
         """ウェイポイントをYAMLファイルとしてエクスポート"""
@@ -2302,18 +2331,11 @@ class MainWindow(QMainWindow):
             current_format = format_manager.get_format()
             
             for wp in self.image_viewer.waypoints:
-                waypoint_data = {}
-                for key, type_info in current_format['format'].items():
-                    if key == 'number':
-                        waypoint_data[key] = wp.number
-                    elif key == 'x':
-                        waypoint_data[key] = float(wp.x)
-                    elif key == 'y':
-                        waypoint_data[key] = float(wp.y)
-                    elif key == 'angle_degrees':
-                        waypoint_data[key] = float(wp.angle * 180 / np.pi)
-                    elif key == 'angle_radians':
-                        waypoint_data[key] = float(wp.angle)
+                waypoint_data = {
+                    key: self.get_waypoint_value(wp, key, type_info)
+                    for key, type_info in current_format['format'].items()
+                    if self.get_waypoint_value(wp, key, type_info) is not None
+                }
                 waypoints_data.append(waypoint_data)
             
             data = {
@@ -2388,11 +2410,23 @@ class FormatEditorPanel(QWidget):
 
     def __init__(self):
         super().__init__()
+        # デフォルトのフォーマットを保存
+        self.default_format = {
+            'version': '1.0',
+            'format': {
+                'number': 'int',
+                'x': 'float',
+                'y': 'float',
+                'angle_degrees': 'float',
+                'angle_radians': 'float'
+            }
+        }
         self.setup_ui()
         format_manager.add_observer(self.on_format_changed)
 
     def setup_ui(self):
         layout = QVBoxLayout(self)
+        layout.setSpacing(5)
         
         # タイトル
         title_label = QLabel("Format Editor")
@@ -2406,17 +2440,32 @@ class FormatEditorPanel(QWidget):
             }
         """)
 
+        # コンテンツエリア（白い背景のコンテナ）
+        content_widget = QWidget()
+        content_widget.setStyleSheet("""
+            QWidget {
+                background-color: white;
+                border: 1px solid #ccc;
+                border-radius: 3px;
+                padding: 10px;
+            }
+        """)
+        content_layout = QVBoxLayout(content_widget)
+        content_layout.setSpacing(10)
+        
         # 編集エリア
         self.editor = QTextEdit()
         self.editor.setStyleSheet("""
             QTextEdit {
                 font-family: monospace;
-                background-color: white;
                 border: 1px solid #ccc;
                 border-radius: 3px;
                 padding: 5px;
             }
         """)
+
+        # ボタンのレイアウト
+        button_layout = QHBoxLayout()
         
         # 更新ボタン
         update_button = QPushButton("Update Format")
@@ -2426,6 +2475,7 @@ class FormatEditorPanel(QWidget):
                 color: white;
                 padding: 5px 10px;
                 border-radius: 3px;
+                min-width: 100px;
             }
             QPushButton:hover {
                 background-color: #1976D2;
@@ -2433,12 +2483,43 @@ class FormatEditorPanel(QWidget):
         """)
         update_button.clicked.connect(self.update_format)
 
+        # リセットボタン
+        reset_button = QPushButton("Reset to Default")
+        reset_button.setStyleSheet("""
+            QPushButton {
+                background-color: #757575;
+                color: white;
+                padding: 5px 10px;
+                border-radius: 3px;
+                min-width: 100px;
+            }
+            QPushButton:hover {
+                background-color: #616161;
+            }
+        """)
+        reset_button.clicked.connect(self.reset_to_default)
+
+        # ボタンをレイアウトに追加
+        button_layout.addWidget(update_button)
+        button_layout.addWidget(reset_button)
+        
+        # コンテンツレイアウトに要素を追加
+        content_layout.addWidget(self.editor)
+        content_layout.addLayout(button_layout)
+
+        # メインレイアウトに要素を追加
         layout.addWidget(title_label)
-        layout.addWidget(self.editor)
-        layout.addWidget(update_button)
+        layout.addWidget(content_widget)
 
         # 初期フォーマットを表示
         self.show_current_format()
+
+    def reset_to_default(self):
+        """フォーマットをデフォルトに戻す"""
+        # デフォルトのフォーマットを設定
+        format_manager.set_format(self.default_format)
+        self.show_current_format()
+        QMessageBox.information(self, "Success", "Format reset to default")
 
     def show_current_format(self):
         format_text = yaml.dump(format_manager.get_format(), default_flow_style=False)
