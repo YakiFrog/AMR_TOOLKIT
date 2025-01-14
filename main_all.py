@@ -259,7 +259,7 @@ class DrawableLabel(QLabel):
             scaled_size = size
             
         # サイズが変更された場合のみ新しいカーソルを作成
-        if scaled_size != self.current_cursor_size:
+        if (scaled_size != self.current_cursor_size):
             self.current_cursor_size = scaled_size
             # カーソルサイズを実際の描画サイズに合わせて調整（*2を削除）
             cursor_size = max(scaled_size, 8)  # カーソルの最小サイズを8ピクセルに設定
@@ -1193,6 +1193,40 @@ class ImageViewer(QWidget):
             self.waypoint_added.emit(waypoint)  # UIを更新
 
     def draw_origin_point(self):
+        """原点マーカーを描画"""
+        if not self.origin_point or not self.pgm_layer.pixmap:
+            return
+
+        # origin_layerのピクスマップを初期化
+        if not self.origin_layer.pixmap or self.origin_layer.pixmap.size() != self.pgm_layer.pixmap.size():
+            self.origin_layer.pixmap = QPixmap(self.pgm_layer.pixmap.size())
+            self.origin_layer.pixmap.fill(Qt.GlobalColor.transparent)
+
+        # 既存の描画をクリア
+        self.origin_layer.pixmap.fill(Qt.GlobalColor.transparent)
+        
+        # 原点マーカーを描画
+        painter = QPainter(self.origin_layer.pixmap)
+        painter.setRenderHint(QPainter.RenderHint.Antialiasing)
+        
+        # 原点の位置を取得
+        x, y = self.origin_point
+        
+        # クロスマーカーを描画
+        marker_size = 20
+        pen = QPen(QColor(255, 0, 0))  # 赤色
+        pen.setWidth(3)
+        painter.setPen(pen)
+        
+        # 十字マーカー
+        painter.drawLine(x - marker_size, y, x + marker_size, y)
+        painter.drawLine(x, y - marker_size, x, y + marker_size)
+        
+        # 円を描画
+        painter.drawEllipse(x - marker_size//2, y - marker_size//2, marker_size, marker_size)
+        
+        painter.end()
+        
         self.update_display()
 
     def generate_path(self):

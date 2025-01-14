@@ -3,6 +3,7 @@ format:
   angle_radians: float
   number: int
   rotate: int
+  take_photo: int
   x: float
   y: float
 version: '1.0'
