@@ -1566,9 +1566,28 @@ class RightPanel(QWidget):
         """)
         clear_button.clicked.connect(self.all_waypoints_delete_requested.emit)
         
+        # パス生成ボタンと全削除ボタンの間にインポートボタンを追加
+        import_button = QPushButton("Import Waypoints")
+        import_button.setToolTip("Import Waypoints from YAML")
+        import_button.setStyleSheet("""
+            QPushButton {
+                background-color: #2196F3;
+                color: white;
+                border-radius: 3px;
+                padding: 5px 10px;
+                font-size: 12px;
+                min-width: 60px;
+            }
+            QPushButton:hover {
+                background-color: #1976D2;
+            }
+        """)
+        import_button.clicked.connect(self.handle_import_waypoints)
+        
         header_layout.addWidget(title_label)
+        header_layout.addWidget(import_button)  # インポートボタンを追加
         header_layout.addStretch()
-        header_layout.addWidget(self.generate_path_button)  # パス生成ボタンを追加
+        header_layout.addWidget(self.generate_path_button)
         header_layout.addWidget(clear_button)
         
         # スクロールエリアの作成と設定を更新
@@ -1613,7 +1632,7 @@ class RightPanel(QWidget):
         layout = QVBoxLayout(widget)
         
         # タイトル
-        title_label = QLabel("Export/Import")  # タイトルを変更
+        title_label = QLabel("Export")  # タイトルを元に戻す
         title_label.setStyleSheet("""
             QLabel {
                 font-size: 14px;
@@ -1660,28 +1679,10 @@ class RightPanel(QWidget):
         """)
         export_button.clicked.connect(self.handle_export)
         
-        # インポートボタン追加
-        import_button = QPushButton("Import Waypoints")
-        import_button.setStyleSheet("""
-            QPushButton {
-                background-color: #2196F3;
-                color: white;
-                border-radius: 3px;
-                padding: 8px;
-                font-size: 12px;
-                min-width: 100px;
-            }
-            QPushButton:hover {
-                background-color: #1976D2;
-            }
-        """)
-        import_button.clicked.connect(self.handle_import_waypoints)
-        
-        # レイアウトに追加
+        # レイアウトに追加（インポートボタン関連の行を削除）
         content_layout.addWidget(self.export_pgm_cb)
         content_layout.addWidget(self.export_waypoints_cb)
         button_layout.addWidget(export_button)
-        button_layout.addWidget(import_button)
         content_layout.addLayout(button_layout)
         
         layout.addWidget(title_label)
@@ -2353,7 +2354,7 @@ class MainWindow(QMainWindow):
             # フォーマットバージョンの確認
             if 'format_version' in data:
                 version = data['format_version']
-                if version != WAYPOINT_FORMAT['version']:
+                if (version != WAYPOINT_FORMAT['version']):
                     print(f"Warning: YAML format version mismatch. Expected {WAYPOINT_FORMAT['version']}, got {version}")
             
             # ImageViewerにインポート処理を依頼
@@ -2373,4 +2374,5 @@ def main():
 
 if __name__ == '__main__':
     main()
+
 
