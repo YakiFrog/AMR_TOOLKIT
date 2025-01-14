@@ -697,8 +697,8 @@ class ImageViewer(QWidget):
         if self.drawing_mode == DrawingMode.PEN:
             painter.setPen(QPen(self.pen_color, scaled_pen_size, Qt.PenStyle.SolidLine, Qt.PenCapStyle.RoundCap, Qt.PenJoinStyle.RoundJoin))
         else:  # ERASER
-            painter.setCompositionMode(QPainter.CompositionMode.CompositionMode_Clear)
-            painter.setPen(QPen(Qt.GlobalColor.transparent, scaled_eraser_size, Qt.PenStyle.SolidLine, Qt.PenCapStyle.RoundCap, Qt.PenJoinStyle.RoundJoin))
+            # 消しゴムを白色に変更
+            painter.setPen(QPen(Qt.GlobalColor.white, scaled_eraser_size, Qt.PenStyle.SolidLine, Qt.PenCapStyle.RoundCap, Qt.PenJoinStyle.RoundJoin))
 
         painter.drawLine(scaled_start, scaled_end)
         painter.end()
@@ -1885,7 +1885,7 @@ class WaypointListItem(QWidget):
             try:
                 # ドラッグ開始時にタイマーをリセット
                 right_panel = self.get_right_panel()
-                if right_panel:
+                if (right_panel):
                     right_panel.stop_auto_scroll()
                 
                 drag = QDrag(self)
