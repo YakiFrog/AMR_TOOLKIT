@@ -1483,10 +1483,10 @@ class RightPanel(QWidget):
         header_layout.addWidget(self.generate_path_button)  # パス生成ボタンを追加
         header_layout.addWidget(clear_button)
         
-        # スクロールエリアの作成
-        scroll_area = QScrollArea()
-        scroll_area.setWidgetResizable(True)
-        scroll_area.setStyleSheet("""
+        # スクロールエリアの作成と設定を更新
+        self.scroll_area = QScrollArea()  # インスタンス変数として保存
+        self.scroll_area.setWidgetResizable(True)
+        self.scroll_area.setStyleSheet("""
             QScrollArea {
                 background-color: white;
                 border: 1px solid #ccc;
@@ -1508,16 +1508,52 @@ class RightPanel(QWidget):
         self.waypoint_list_layout.setAlignment(Qt.AlignmentFlag.AlignTop)
         
         # スクロールエリアにウェイポイントリストを設定
-        scroll_area.setWidget(self.waypoint_list)
+        self.scroll_area.setWidget(self.waypoint_list)
         
-        # 固定の高さを設定（必要に応じて調整）
-        scroll_area.setMinimumHeight(150)
-        scroll_area.setMaximumHeight(300)
+        # 固定の高さを設定
+        self.scroll_area.setMinimumHeight(150)
+        self.scroll_area.setMaximumHeight(300)
         
-        layout.addLayout(header_layout)  # ヘッダーレイアウトを先頭に追加
-        layout.addWidget(scroll_area)
+        layout.addLayout(header_layout)
+        layout.addWidget(self.scroll_area)
         
         return widget
+
+    # スクロールタイマーの設定用メソッドを追加
+    def start_auto_scroll(self):
+        if not hasattr(self, 'scroll_timer'):
+            self.scroll_timer = QTimer()
+            self.scroll_timer.timeout.connect(self.auto_scroll)
+            self.scroll_timer.start(50)  # 50ミリ秒ごとにスクロール
+
+    def stop_auto_scroll(self):
+        if hasattr(self, 'scroll_timer'):
+            self.scroll_timer.stop()
+            delattr(self, 'scroll_timer')
+            self.scroll_region = None
+
+    def auto_scroll(self):
+        """自動スクロールの処理"""
+        if not hasattr(self, 'scroll_region'):
+            return
+        
+        scroll_bar = self.scroll_area.verticalScrollBar()
+        current = scroll_bar.value()
+        
+        # スクロール速度を調整
+        scroll_speed = 5
+        
+        if self.scroll_region == 'up':
+            new_value = max(scroll_bar.minimum(), current - scroll_speed)
+            scroll_bar.setValue(new_value)
+        elif self.scroll_region == 'down':
+            new_value = min(scroll_bar.maximum(), current + scroll_speed)
+            scroll_bar.setValue(new_value)
+
+        # スクロールが最端に達したら停止
+        if (self.scroll_region == 'up' and scroll_bar.value() == scroll_bar.minimum()) or \
+           (self.scroll_region == 'down' and scroll_bar.value() == scroll_bar.maximum()):
+            self.stop_auto_scroll()
 
     def handle_path_toggle(self):
         """パスの表示/非表示を切り替え"""
@@ -1732,19 +1768,81 @@ class WaypointListItem(QWidget):
             self.angle_label.setText(f"{degrees}°")
 
     def mousePressEvent(self, event):
-        if not self.isVisible():  # Add check for widget visibility
+        if not self.isVisible():
             return
         if event.button() == Qt.MouseButton.LeftButton:
             try:
+                # ドラッグ開始時にタイマーをリセット
+                right_panel = self.get_right_panel()
+                if right_panel:
+                    right_panel.stop_auto_scroll()
+                
                 drag = QDrag(self)
                 mime_data = QMimeData()
                 mime_data.setText(str(self.waypoint_number))
                 drag.setMimeData(mime_data)
-                drag.exec()
+                
+                # ドラッグ中のイベントを監視
+                drag.exec(Qt.DropAction.MoveAction)
             except RuntimeError:
-                # Handle case where widget is already deleted
                 pass
         super().mousePressEvent(event)
+
+    def mouseMoveEvent(self, event):
+        # ドラッグ中のマウス位置を取得して自動スクロールの判定
+        right_panel = self.get_right_panel()
+        if right_panel and hasattr(right_panel, 'scroll_area'):
+            scroll_area = right_panel.scroll_area
+            pos_in_scroll = scroll_area.mapFromGlobal(self.mapToGlobal(event.position().toPoint()))
+            
+            # スクロール領域の上下端から20ピクセルの範囲を自動スクロール領域とする
+            scroll_margin = 20
+            
+            if pos_in_scroll.y() < scroll_margin:
+                right_panel.scroll_region = 'up'
+                right_panel.start_auto_scroll()
+            elif pos_in_scroll.y() > scroll_area.height() - scroll_margin:
+                right_panel.scroll_region = 'down'
+                right_panel.start_auto_scroll()
+            else:
+                right_panel.stop_auto_scroll()
+        
+        super().mouseMoveEvent(event)
+
+    def dragMoveEvent(self, event):
+        # ドラッグ中のマウス位置を取得して自動スクロールの判定
+        right_panel = self.get_right_panel()
+        if right_panel and hasattr(right_panel, 'scroll_area'):
+            scroll_area = right_panel.scroll_area
+            pos_in_scroll = scroll_area.mapFromGlobal(QCursor.pos())
+            
+            # スクロール領域の上下端から30ピクセルの範囲を自動スクロール領域とする
+            scroll_margin = 30
+            
+            if pos_in_scroll.y() < scroll_margin:
+                right_panel.scroll_region = 'up'
+                right_panel.start_auto_scroll()
+            elif pos_in_scroll.y() > scroll_area.height() - scroll_margin:
+                right_panel.scroll_region = 'down'
+                right_panel.start_auto_scroll()
+            else:
+                right_panel.stop_auto_scroll()
+
+        event.accept()
+
+    def mouseReleaseEvent(self, event):
+        # ドラッグ終了時に自動スクロールを停止
+        right_panel = self.get_right_panel()
+        if right_panel:
+            right_panel.stop_auto_scroll()
+        super().mouseReleaseEvent(event)
+
+    def get_right_panel(self):
+        """親のRightPanelウィジェットを取得"""
+        parent = self.parent()
+        while parent and not isinstance(parent, RightPanel):
+            parent = parent.parent()
+        return parent
 
     def dragEnterEvent(self, event):
         if event.mimeData().hasText() and event.source() != self:
