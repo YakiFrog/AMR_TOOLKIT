@@ -1636,7 +1636,7 @@ class WaypointListItem(QWidget):
         number_badge.setStyleSheet("""
             QLabel {
                 color: white;
-                background-color: #2196F3;
+                background-color: #f44336;
                 border-radius: 3px;
                 padding: 2px 6px;
                 font-size: 11px;
@@ -1644,12 +1644,11 @@ class WaypointListItem(QWidget):
                 text-align: center;
             }
         """)
-        number_badge.setFixedWidth(40) # 固定幅に設定
+        number_badge.setFixedWidth(40)
         
         # 座標情報（モノスペースフォントで整列）
-        coord_text = f"({waypoint.x:.2f}, {waypoint.y:.2f})"
-        coord_label = QLabel(coord_text)
-        coord_label.setStyleSheet("""
+        self.coord_label = QLabel(f"({waypoint.x:.2f}, {waypoint.y:.2f})")  # インスタンス変数として保存
+        self.coord_label.setStyleSheet("""
             QLabel {
                 color: #424242;
                 font-size: 12px;
@@ -1661,8 +1660,8 @@ class WaypointListItem(QWidget):
         
         # 角度表示（丸いバッジ風）
         degrees = int(waypoint.angle * 180 / np.pi)
-        angle_label = QLabel(f"{degrees}°")
-        angle_label.setStyleSheet("""
+        self.angle_label = QLabel(f"{degrees}°")  # インスタンス変数として保存
+        self.angle_label.setStyleSheet("""
             QLabel {
                 color: #666666;
                 background-color: #f5f5f5;
@@ -1674,7 +1673,7 @@ class WaypointListItem(QWidget):
                 text-align: center;
             }
         """)
-        
+
         # 削除ボタン
         delete_button = QPushButton("×")
         delete_button.setFixedSize(20, 20)
@@ -1697,8 +1696,8 @@ class WaypointListItem(QWidget):
         # フレームにウィジェットを追加
         frame_layout.addWidget(drag_handle)
         frame_layout.addWidget(number_badge)
-        frame_layout.addWidget(coord_label, 1)  # 座標ラベルを伸縮可能に
-        frame_layout.addWidget(angle_label)
+        frame_layout.addWidget(self.coord_label, 1)
+        frame_layout.addWidget(self.angle_label)
         frame_layout.addWidget(delete_button)
         
         # メインレイアウトにフレームを追加
@@ -1722,12 +1721,15 @@ class WaypointListItem(QWidget):
         # フォーカスポリシーを設定
         self.setFocusPolicy(Qt.FocusPolicy.NoFocus)
         self.frame.setFocusPolicy(Qt.FocusPolicy.NoFocus)
-        coord_label.setFocusPolicy(Qt.FocusPolicy.NoFocus)
+        self.coord_label.setFocusPolicy(Qt.FocusPolicy.NoFocus)
 
     def update_label(self, text):
         """ラベルテキストを更新"""
-        # 表示形式を保持するため、更新は行わない
-        pass
+        # waypoint情報を更新
+        if hasattr(self, 'waypoint'):
+            degrees = int(self.waypoint.angle * 180 / np.pi)
+            self.coord_label.setText(f"({self.waypoint.x:.2f}, {self.waypoint.y:.2f})")
+            self.angle_label.setText(f"{degrees}°")
 
     def mousePressEvent(self, event):
         if not self.isVisible():  # Add check for widget visibility
