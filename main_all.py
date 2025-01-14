@@ -31,6 +31,18 @@ MIN_SCALE = 0.02  # 1/50 (スライダー値1に対応)
 MAX_SCALE = 2.0   # 100/50 (スライダー値100に対応)
 DEFAULT_SCALE = 1.0  # 50/50 (スライダー値50に対応)
 
+# Waypointのエクスポート/インポートフォーマット定義
+WAYPOINT_FORMAT = {
+    'version': '1.0',
+    'format': {
+        'number': 'int',
+        'x': 'float',
+        'y': 'float',
+        'angle_degrees': 'float',
+        'angle_radians': 'float'
+    }
+}
+
 # 描画モードの定数
 class DrawingMode(Enum):
     NONE = 0
@@ -677,7 +689,7 @@ class ImageViewer(QWidget):
         self.scroll_area.set_drawing_mode(mode != DrawingMode.NONE)
         # カーソルを更新
         if mode != DrawingMode.NONE:
-            if mode == DrawingMode.WAYPOINT:
+            if (mode == DrawingMode.WAYPOINT):
                 self.pgm_display.setCursor(Qt.CursorShape.CrossCursor)
             else:
                 self.pgm_display.updateCursor()
@@ -1156,7 +1168,7 @@ class ImageViewer(QWidget):
         self.pgm_display.setCursor(Qt.CursorShape.ArrowCursor)
 
     def get_combined_pixmap(self):
-        """全レイヤーを合成したピクスマップを取得"""
+        """全レイヤーを合成したピクスマップを取得（エクスポート用）"""
         if not self.pgm_layer.pixmap:
             return None
 
@@ -1166,14 +1178,59 @@ class ImageViewer(QWidget):
         
         painter = QPainter(result)
         
-        # 全レイヤーを描画
-        for layer in self.layers:
+        # エクスポートに含めるレイヤーのみを描画
+        # origin_layerを除外し、他のレイヤーのみを描画
+        export_layers = [
+            self.pgm_layer,
+            self.drawing_layer,
+        ]
+        
+        for layer in export_layers:
             if layer.visible and layer.pixmap:
                 painter.setOpacity(layer.opacity)
                 painter.drawPixmap(0, 0, layer.pixmap)
         
         painter.end()
         return result
+
+    def import_waypoints_from_yaml(self, yaml_data):
+        """YAMLデータからウェイポイントをインポート"""
+        if 'waypoints' not in yaml_data:
+            return
+
+        # 既存のウェイポイントをクリア
+        self.waypoints.clear()
+        Waypoint.reset_counter()
+        
+        for wp_data in yaml_data['waypoints']:
+            try:
+                # ピクセル座標を計算
+                if self.origin_point and hasattr(self, 'resolution'):
+                    origin_x, origin_y = self.origin_point
+                    x_meters = wp_data['x']
+                    y_meters = wp_data['y']
+                    
+                    # メートル座標からピクセル座標に変換
+                    pixel_x = int(origin_x + (x_meters / self.resolution))
+                    pixel_y = int(origin_y - (y_meters / self.resolution))
+                    
+                    # 角度の取得（度からラジアンに変換）
+                    angle = np.radians(wp_data['angle_degrees'])
+                    
+                    # 新しいウェイポイントを作成
+                    waypoint = Waypoint(pixel_x, pixel_y, angle)
+                    waypoint.update_metric_coordinates(origin_x, origin_y, self.resolution)
+                    
+                    self.waypoints.append(waypoint)
+                    self.waypoint_added.emit(waypoint)
+            except KeyError as e:
+                print(f"Error importing waypoint: Missing key {e}")
+                continue
+            except Exception as e:
+                print(f"Error importing waypoint: {e}")
+                continue
+        
+        self.update_display()
 
 class MenuPanel(QWidget):
     """メニューパネル
@@ -1363,6 +1420,7 @@ class RightPanel(QWidget):
     waypoint_reorder_requested = Signal(int, int)  # 順序変更シグナルを追加
     generate_path_requested = Signal()  # パス生成用シグナル
     export_requested = Signal(bool, bool)  # (export_pgm, export_waypoints)
+    waypoint_import_requested = Signal(str)  # YAMLファイルパスを送信
     
     def __init__(self):
         super().__init__()
@@ -1555,7 +1613,7 @@ class RightPanel(QWidget):
         layout = QVBoxLayout(widget)
         
         # タイトル
-        title_label = QLabel("Export")
+        title_label = QLabel("Export/Import")  # タイトルを変更
         title_label.setStyleSheet("""
             QLabel {
                 font-size: 14px;
@@ -1582,6 +1640,9 @@ class RightPanel(QWidget):
         self.export_pgm_cb = QCheckBox("Export PGM with drawings")
         self.export_waypoints_cb = QCheckBox("Export Waypoints YAML")
         
+        # ボタンのレイアウト
+        button_layout = QHBoxLayout()
+        
         # エクスポートボタン
         export_button = QPushButton("Export Selected")
         export_button.setStyleSheet("""
@@ -1599,15 +1660,45 @@ class RightPanel(QWidget):
         """)
         export_button.clicked.connect(self.handle_export)
         
+        # インポートボタン追加
+        import_button = QPushButton("Import Waypoints")
+        import_button.setStyleSheet("""
+            QPushButton {
+                background-color: #2196F3;
+                color: white;
+                border-radius: 3px;
+                padding: 8px;
+                font-size: 12px;
+                min-width: 100px;
+            }
+            QPushButton:hover {
+                background-color: #1976D2;
+            }
+        """)
+        import_button.clicked.connect(self.handle_import_waypoints)
+        
         # レイアウトに追加
         content_layout.addWidget(self.export_pgm_cb)
         content_layout.addWidget(self.export_waypoints_cb)
-        content_layout.addWidget(export_button, alignment=Qt.AlignmentFlag.AlignCenter)
+        button_layout.addWidget(export_button)
+        button_layout.addWidget(import_button)
+        content_layout.addLayout(button_layout)
         
         layout.addWidget(title_label)
         layout.addWidget(content)
         
         return widget
+
+    def handle_import_waypoints(self):
+        """Waypointのインポート処理"""
+        file_name, _ = QFileDialog.getOpenFileName(
+            self,
+            "Import Waypoints YAML",
+            "",
+            "YAML Files (*.yaml);;All Files (*)"
+        )
+        if file_name:
+            self.waypoint_import_requested.emit(file_name)
 
     def handle_export(self):
         """エクスポートボタンクリック時の処理"""
@@ -2101,6 +2192,9 @@ class MainWindow(QMainWindow):
         # エクスポート時の処理を接続
         self.analysis_panel.export_requested.connect(self.handle_export)
 
+        # インポート時の処理を接続
+        self.analysis_panel.waypoint_import_requested.connect(self.import_waypoints_yaml)
+
     def update_layer_panel(self):
         """レイヤーパネルの表示を更新"""
         if hasattr(self, 'analysis_panel') and hasattr(self, 'image_viewer'):
@@ -2227,22 +2321,48 @@ class MainWindow(QMainWindow):
         if file_name:
             waypoints_data = []
             for wp in self.image_viewer.waypoints:
-                # NumPy float64を通常のPythonのfloatに変換
-                angle_degrees = float(wp.angle * 180 / np.pi)  # ラジアンを度に変換
-                waypoints_data.append({
+                # WAYPOINT_FORMATに従ってデータを構築
+                angle_degrees = float(wp.angle * 180 / np.pi)
+                # ウェイポイントデータを辞書として追加
+                waypoint_data = {
                     'number': wp.number,
                     'x': float(wp.x),
                     'y': float(wp.y),
-                    'angle_degrees': angle_degrees,  # 度数法で保存
-                    'angle_radians': float(wp.angle)  # ラジアンも保存
-                })
+                    'angle_degrees': angle_degrees,
+                    'angle_radians': float(wp.angle)
+                }
+                waypoints_data.append(waypoint_data) 
             
-            data = {'waypoints': waypoints_data}
+            data = {
+                'format_version': WAYPOINT_FORMAT['version'],
+                'waypoints': waypoints_data 
+            }
+            
             try:
                 with open(file_name, 'w') as f:
                     yaml.dump(data, f, default_flow_style=False, sort_keys=False)
             except Exception as e:
                 print(f"Error saving waypoints YAML: {str(e)}")
+
+    def import_waypoints_yaml(self, file_path):
+        """Waypointの設定をYAMLファイルからインポート"""
+        try:
+            with open(file_path, 'r') as f:
+                data = yaml.safe_load(f)
+                
+            # フォーマットバージョンの確認
+            if 'format_version' in data:
+                version = data['format_version']
+                if version != WAYPOINT_FORMAT['version']:
+                    print(f"Warning: YAML format version mismatch. Expected {WAYPOINT_FORMAT['version']}, got {version}")
+            
+            # ImageViewerにインポート処理を依頼
+            self.image_viewer.import_waypoints_from_yaml(data)
+            
+        except Exception as e:
+            print(f"Error importing waypoints YAML: {str(e)}")
+            import traceback
+            traceback.print_exc()
 
 def main():
     """アプリケーションのメインエントリーポイント"""
