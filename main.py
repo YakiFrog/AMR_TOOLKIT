@@ -2217,17 +2217,20 @@ class MainWindow(QMainWindow):
         if file_name:
             waypoints_data = []
             for wp in self.image_viewer.waypoints:
+                # NumPy float64を通常のPythonのfloatに変換
+                angle_degrees = float(wp.angle * 180 / np.pi)  # ラジアンを度に変換
                 waypoints_data.append({
                     'number': wp.number,
-                    'x': wp.x,
-                    'y': wp.y,
-                    'angle': wp.angle
+                    'x': float(wp.x),
+                    'y': float(wp.y),
+                    'angle_degrees': angle_degrees,  # 度数法で保存
+                    'angle_radians': float(wp.angle)  # ラジアンも保存
                 })
             
             data = {'waypoints': waypoints_data}
             try:
                 with open(file_name, 'w') as f:
-                    yaml.dump(data, f, default_flow_style=False)
+                    yaml.dump(data, f, default_flow_style=False, sort_keys=False)
             except Exception as e:
                 print(f"Error saving waypoints YAML: {str(e)}")
 
