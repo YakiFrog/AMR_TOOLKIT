@@ -1810,7 +1810,7 @@ class WaypointListItem(QWidget):
                 drag.exec(Qt.DropAction.MoveAction)
             except RuntimeError:
                 pass
-        super().mousePressEvent(event)
+        # マウスイベントの伝播を停止（super呼び出しを削除）
 
     def mouseMoveEvent(self, event):
         # ドラッグ中のマウス位置を取得して自動スクロールの判定
@@ -1906,11 +1906,12 @@ class WaypointListItem(QWidget):
                 # ドロップ位置に基づいて順序を変更
                 parent.handle_waypoint_reorder(source_number, target_number)
         
-        # スタイルを元に戻す
-        self.label.setStyleSheet("""
-            QLabel {
-                font-size: 14px;
-                font-weight: 500;
+        # frameのスタイルを元に戻す
+        self.frame.setStyleSheet("""
+            QFrame {
+                background-color: white;
+                border: 1px solid #e0e0e0;
+                border-radius: 4px;
             }
         """)
         event.accept()
