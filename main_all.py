@@ -370,8 +370,8 @@ class DrawableLabel(QLabel):
                         if waypoint.attributes:
                             tooltip = "<b>Actions:</b><br>"
                             for key, value in waypoint.attributes.items():
-                                tooltip += f"{key}: {value}\n"
-                            QToolTip.showText(event.globalPos(), tooltip.strip())
+                                tooltip += f"{key}: {value} <br>"
+                            QToolTip.showText(event.globalPosition(), tooltip.strip())
                             return
                 
                 QToolTip.hideText()
