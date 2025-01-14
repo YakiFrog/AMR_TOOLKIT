@@ -6,7 +6,7 @@ from PySide6.QtWidgets import (QApplication, QMainWindow, QWidget, QVBoxLayout,
                               QHBoxLayout, QMenuBar, QMenu, QLabel, QPushButton,
                               QFileDialog, QScrollArea, QSplitter, QGesture, 
                               QPinchGesture, QSlider, QCheckBox, QFrame, QTextEdit, QMessageBox, QDialog, QLineEdit)
-from PySide6.QtCore import Qt, QPoint, Signal, QEvent, QSize, QMimeData, QTimer
+from PySide6.QtCore import Qt, QPoint, Signal, QEvent, QSize, QMimeData, QTimer, QRect
 from PySide6.QtGui import (QPixmap, QImage, QWheelEvent, QPainter, QPen, QCursor,
                           QDrag, QColor)  # QDragをQtGuiからインポート
 from enum import Enum
@@ -974,6 +974,31 @@ class ImageViewer(QWidget):
                 text_y = y + text_height // 3
                 painter.drawText(text_x, text_y, number_text)
 
+                # 属性の数を描画（右上に小さく表示）
+                num_attributes = len(waypoint.attributes)
+                if num_attributes > 0:
+                    painter.setPen(QColor(255, 255, 255))
+                    font.setPointSize(10)
+                    font.setBold(True)
+                    painter.setFont(font)
+                    attr_text = str(num_attributes)
+                    attr_x = x + adjusted_size - 5
+                    attr_y = y - adjusted_size + 5
+                    # 背景円を描画
+                    painter.setBrush(QColor(50, 50, 50, 200))
+                    painter.drawEllipse(attr_x - 8, attr_y - 12, 16, 16)
+                    # 数字を描画
+                    painter.drawText(attr_x - 3, attr_y, attr_text)
+
+                # ホバー時のツールチップ領域を設定
+                hover_rect = QRect(
+                    x - adjusted_size,
+                    y - adjusted_size,
+                    adjusted_size * 2,
+                    adjusted_size * 2
+                )
+                waypoint.hover_rect = hover_rect  # 後でホバー判定に使用
+
         # 6. 原点レイヤーを描画（最上層）
         if self.origin_layer.visible and self.origin_layer.pixmap:
             painter.setOpacity(self.origin_layer.opacity)
@@ -1290,6 +1315,35 @@ class ImageViewer(QWidget):
                 continue
         
         self.update_display()
+
+    def mouseMoveEvent(self, event):
+        """マウス移動時のイベント処理"""
+        # 既存のmouseMoveEventの処理を維持
+        super().mouseMoveEvent(event)
+        
+        # ウェイポイントのホバー判定とツールチップ表示
+        if self.pgm_layer.pixmap:
+            pixmap_geometry = self.pgm_display.geometry()
+            scale_x = pixmap_geometry.width() / self.pgm_layer.pixmap.width()
+            mouse_pos = event.pos()
+            
+            # スケールを考慮した座標に変換
+            scaled_pos = QPoint(
+                int(mouse_pos.x() / scale_x),
+                int(mouse_pos.y() / scale_x)
+            )
+            
+            for waypoint in self.waypoints:
+                if hasattr(waypoint, 'hover_rect') and waypoint.hover_rect.contains(scaled_pos):
+                    # 属性情報のツールチップを作成
+                    if waypoint.attributes:
+                        tooltip = "Attributes:\n"
+                        for key, value in waypoint.attributes.items():
+                            tooltip += f"{key}: {value}\n"
+                        QToolTip.showText(event.globalPos(), tooltip.strip())
+                        return
+            
+            QToolTip.hideText()
 
 class MenuPanel(QWidget):
     """メニューパネル
