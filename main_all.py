@@ -5,7 +5,8 @@ import yaml  # PyYAMLをインポート
 from PySide6.QtWidgets import (QApplication, QMainWindow, QWidget, QVBoxLayout, 
                               QHBoxLayout, QMenuBar, QMenu, QLabel, QPushButton,
                               QFileDialog, QScrollArea, QSplitter, QGesture, 
-                              QPinchGesture, QSlider, QCheckBox, QFrame, QTextEdit, QMessageBox, QDialog, QLineEdit)
+                              QPinchGesture, QSlider, QCheckBox, QFrame, QTextEdit,
+                              QMessageBox, QDialog, QLineEdit, QToolTip)
 from PySide6.QtCore import Qt, QPoint, Signal, QEvent, QSize, QMimeData, QTimer, QRect
 from PySide6.QtGui import (QPixmap, QImage, QWheelEvent, QPainter, QPen, QCursor,
                           QDrag, QColor)  # QDragをQtGuiからインポート
@@ -346,10 +347,36 @@ class DrawableLabel(QLabel):
             super().mousePressEvent(event)
 
     def mouseMoveEvent(self, event):
+        """マウス移動時のイベント処理"""
         # マウス位置を通知
-        pos = event.position().toPoint()  # 修正
+        pos = event.position().toPoint()
         self.mouse_position_changed.emit(pos)
-        # 既存の処理を継続
+
+        if self.parent_viewer and self.parent_viewer.waypoints:
+            pixmap_geometry = self.geometry()
+            if self.parent_viewer.pgm_layer.pixmap:
+                scale_x = self.parent_viewer.pgm_layer.pixmap.width() / pixmap_geometry.width()
+                scale_y = self.parent_viewer.pgm_layer.pixmap.height() / pixmap_geometry.height()
+                
+                # スケールを考慮した座標に変換
+                x = int(pos.x() * scale_x)
+                y = int(pos.y() * scale_y)
+                
+                # ホバー検出範囲を設定
+                hover_range = 15  # ピクセル単位での検出範囲
+                
+                for waypoint in self.parent_viewer.waypoints:
+                    if abs(waypoint.pixel_x - x) < hover_range and abs(waypoint.pixel_y - y) < hover_range:
+                        if waypoint.attributes:
+                            tooltip = "<b>Actions:</b><br>"
+                            for key, value in waypoint.attributes.items():
+                                tooltip += f"{key}: {value}\n"
+                            QToolTip.showText(event.globalPos(), tooltip.strip())
+                            return
+                
+                QToolTip.hideText()
+
+        # 既存の描画モード処理を続行
         if self.drawing_enabled and self.parent_viewer:
             if self.is_setting_angle and self.parent_viewer.drawing_mode == DrawingMode.WAYPOINT:
                 if self.temp_waypoint and self.click_pos:
@@ -452,6 +479,7 @@ class DrawableLabel(QLabel):
                         dialog = AttributeDialog(waypoint, format_manager.get_format(), self)
                         if dialog.exec() == QDialog.DialogCode.Accepted:
                             waypoint.attributes = dialog.get_attributes()
+                            self.parent_viewer.update_display()
                             if self.parent_viewer:
                                 self.parent_viewer.waypoint_edited.emit(waypoint)
                     break
@@ -886,7 +914,7 @@ class ImageViewer(QWidget):
         painter = QPainter(result)
         
         # 1. PGMレイヤーを描画（最下層）
-        if self.pgm_layer.visible and self.pgm_layer.pixmap:
+        if (self.pgm_layer.visible and self.pgm_layer.pixmap):
             painter.setOpacity(self.pgm_layer.opacity)
             painter.drawPixmap(0, 0, self.pgm_layer.pixmap)
 
@@ -976,7 +1004,7 @@ class ImageViewer(QWidget):
 
                 # 属性の数を描画（右上に小さく表示）
                 num_attributes = len(waypoint.attributes)
-                if num_attributes > 0:
+                if (num_attributes > 0):
                     painter.setPen(QColor(255, 255, 255))
                     font.setPointSize(10)
                     font.setBold(True)
@@ -1165,31 +1193,6 @@ class ImageViewer(QWidget):
             self.waypoint_added.emit(waypoint)  # UIを更新
 
     def draw_origin_point(self):
-        """origin点を描画"""
-        if not self.origin_point or not self.pgm_layer.pixmap:
-            return
-
-        # originレイヤーのピクスマップを初期化
-        self.origin_layer.pixmap = QPixmap(self.pgm_layer.pixmap.size())
-        self.origin_layer.pixmap.fill(Qt.GlobalColor.transparent)
-
-        painter = QPainter(self.origin_layer.pixmap)
-        painter.setRenderHint(QPainter.RenderHint.Antialiasing)
-
-        # 十字マークを描画
-        x, y = self.origin_point
-        size = 20  # マーカーのサイズ
-        
-        # 赤い十字を描画
-        pen = QPen(Qt.GlobalColor.red, 3)
-        painter.setPen(pen)
-        painter.drawLine(x - size, y, x + size, y)  # 水平線
-        painter.drawLine(x, y - size, x, y + size)  # 垂直線
-        
-        # 円を描画
-        painter.drawEllipse(x - size/2, y - size/2, size, size)
-        
-        painter.end()
         self.update_display()
 
     def generate_path(self):
@@ -2129,8 +2132,6 @@ class WaypointListItem(QWidget):
             elif pos_in_scroll.y() > scroll_area.height() - scroll_margin:
                 right_panel.scroll_region = 'down'
                 right_panel.start_auto_scroll()
-            else:
-                right_panel.stop_auto_scroll()
 
         event.accept()
 
@@ -2745,6 +2746,14 @@ class AttributeDialog(QDialog):
         self.waypoint = waypoint
         self.format_data = format_data
         self.setup_ui()
+        self.parent_viewer = None
+        # 親ウィンドウを遡って ImageViewer を探す
+        current_parent = parent
+        while current_parent:
+            if isinstance(current_parent, ImageViewer):
+                self.parent_viewer = current_parent
+                break
+            current_parent = current_parent.parent()
         
     def setup_ui(self):
         self.setWindowTitle("Add Actions")
@@ -2804,6 +2813,17 @@ class AttributeDialog(QDialog):
                     key = value_edit.property('key')
                     attributes[key] = value_edit.text()
         return attributes
+
+    def accept(self):
+        """OKボタンが押された時の処理"""
+        # 属性を更新
+        self.waypoint.attributes = self.get_attributes()
+        
+        # ImageViewerの表示を更新
+        if self.parent_viewer:
+            self.parent_viewer.update_display()
+        
+        super().accept()
 
 def main():
     """アプリケーションのメインエントリーポイント"""
