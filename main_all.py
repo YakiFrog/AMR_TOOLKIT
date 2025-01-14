@@ -428,9 +428,26 @@ class DrawableLabel(QLabel):
             for waypoint in self.parent_viewer.waypoints:
                 if abs(waypoint.pixel_x - x) < 15 and abs(waypoint.pixel_y - y) < 15:
                     menu = QMenu(self)
-                    edit_action = menu.addAction("Add Action") 
+                    menu.setStyleSheet("""
+                        QMenu {
+                            background-color: #0078d7;
+                            color: white;
+                        }
+                        QMenu::item {
+                            background-color: transparent;
+                            padding: 5px 20px;
+                            color: white;
+                            font-weight: bold;
+                        }
+                        QMenu::item:selected {
+                            background-color: #0058a3;
+                            color: white;
+                        }
+                    """)
+                    edit_action = menu.addAction("Add Actions") 
                     action = menu.exec(event.globalPos())
                     
+                    # ウェイポイントの編集ダイアログを表示
                     if action == edit_action:
                         dialog = AttributeDialog(waypoint, format_manager.get_format(), self)
                         if dialog.exec() == QDialog.DialogCode.Accepted:
@@ -2676,7 +2693,7 @@ class AttributeDialog(QDialog):
         self.setup_ui()
         
     def setup_ui(self):
-        self.setWindowTitle("Edit Attributes")
+        self.setWindowTitle("Add Actions")
         layout = QVBoxLayout(self)
         
         # 属性リスト
