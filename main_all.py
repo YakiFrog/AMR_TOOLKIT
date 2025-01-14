@@ -5,7 +5,8 @@ import yaml  # PyYAMLをインポート
 from PySide6.QtWidgets import (QApplication, QMainWindow, QWidget, QVBoxLayout, 
                               QHBoxLayout, QMenuBar, QMenu, QLabel, QPushButton,
                               QFileDialog, QScrollArea, QSplitter, QGesture, 
-                              QPinchGesture, QSlider, QCheckBox, QFrame)
+                              QPinchGesture, QSlider, QCheckBox, QFrame, QTextEdit, 
+                              QMessageBox, QLineEdit, QComboBox)
 from PySide6.QtCore import Qt, QPoint, Signal, QEvent, QSize, QMimeData, QTimer
 from PySide6.QtGui import (QPixmap, QImage, QWheelEvent, QPainter, QPen, QCursor,
                           QDrag, QColor)  # QDragをQtGuiからインポート
@@ -1441,31 +1442,9 @@ class RightPanel(QWidget):
         self.waypoint_widget = self.create_waypoint_panel()
         layout.addWidget(self.waypoint_widget)
         
-        # Panel 2を追加
-        widget = QWidget()
-        widget_layout = QVBoxLayout(widget)
-        title_label = QLabel("Panel 2")
-        title_label.setStyleSheet("""
-            QLabel {
-                font-size: 14px;
-                font-weight: bold;
-                padding: 5px;
-                background-color: #e0e0e0;
-                border-radius: 3px;
-            }
-        """)
-        content = QWidget()
-        content.setStyleSheet("""
-            QWidget {
-                background-color: white;
-                border: 1px solid #ccc;
-                border-radius: 3px;
-            }
-        """)
-        content.setMinimumHeight(150)
-        widget_layout.addWidget(title_label)
-        widget_layout.addWidget(content)
-        layout.addWidget(widget)
+        # Format Editor (旧Panel 2)を追加
+        self.format_editor = FormatEditorPanel()
+        layout.addWidget(self.format_editor)
         
         # エクスポートパネルを追加
         self.export_widget = self.create_export_panel()
@@ -2321,22 +2300,26 @@ class MainWindow(QMainWindow):
         )
         if file_name:
             waypoints_data = []
+            current_format = format_manager.get_format()
+            
             for wp in self.image_viewer.waypoints:
-                # WAYPOINT_FORMATに従ってデータを構築
-                angle_degrees = float(wp.angle * 180 / np.pi)
-                # ウェイポイントデータを辞書として追加
-                waypoint_data = {
-                    'number': wp.number,
-                    'x': float(wp.x),
-                    'y': float(wp.y),
-                    'angle_degrees': angle_degrees,
-                    'angle_radians': float(wp.angle)
-                }
-                waypoints_data.append(waypoint_data) 
+                waypoint_data = {}
+                for key, type_info in current_format['format'].items():
+                    if key == 'number':
+                        waypoint_data[key] = wp.number
+                    elif key == 'x':
+                        waypoint_data[key] = float(wp.x)
+                    elif key == 'y':
+                        waypoint_data[key] = float(wp.y)
+                    elif key == 'angle_degrees':
+                        waypoint_data[key] = float(wp.angle * 180 / np.pi)
+                    elif key == 'angle_radians':
+                        waypoint_data[key] = float(wp.angle)
+                waypoints_data.append(waypoint_data)
             
             data = {
-                'format_version': WAYPOINT_FORMAT['version'],
-                'waypoints': waypoints_data 
+                'format_version': current_format['version'],
+                'waypoints': waypoints_data
             }
             
             try:
@@ -2350,20 +2333,293 @@ class MainWindow(QMainWindow):
         try:
             with open(file_path, 'r') as f:
                 data = yaml.safe_load(f)
-                
-            # フォーマットバージョンの確認
-            if 'format_version' in data:
-                version = data['format_version']
-                if (version != WAYPOINT_FORMAT['version']):
-                    print(f"Warning: YAML format version mismatch. Expected {WAYPOINT_FORMAT['version']}, got {version}")
             
-            # ImageViewerにインポート処理を依頼
+            current_format = format_manager.get_format()
+            
+            if 'format_version' in data:
+                if data['format_version'] != current_format['version']:
+                    response = QMessageBox.question(
+                        self,
+                        "Version Mismatch",
+                        f"File format version ({data['format_version']}) differs from current version ({current_format['version']}). Continue?",
+                        QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No
+                    )
+                    if response == QMessageBox.StandardButton.No:
+                        return
+            
             self.image_viewer.import_waypoints_from_yaml(data)
             
         except Exception as e:
-            print(f"Error importing waypoints YAML: {str(e)}")
-            import traceback
-            traceback.print_exc()
+            QMessageBox.critical(self, "Error", f"Error importing waypoints: {str(e)}")
+
+# WAYPOINTのフォーマット定義を動的に変更可能にする
+class FormatManager:
+    def __init__(self):
+        self._format = {
+            'version': '1.0',
+            'format': {
+                'number': 'int',
+                'x': 'float',
+                'y': 'float',
+                'angle_degrees': 'float',
+                'angle_radians': 'float'
+            }
+        }
+        self._observers = []
+
+    def get_format(self):
+        return self._format
+
+    def set_format(self, new_format):
+        self._format = new_format
+        self._notify_observers()
+
+    def add_observer(self, observer):
+        self._observers.append(observer)
+
+    def _notify_observers(self):
+        for observer in self._observers:
+            observer(self._format)
+
+# FormatManagerのグローバルインスタンス
+format_manager = FormatManager()
+
+class FormatEditorPanel(QWidget):
+    format_updated = Signal(dict)  # フォーマット更新時のシグナル
+    DEFAULT_FORMAT = {
+        'version': '1.0',
+        'format': {
+            'number': 'int',
+            'x': 'float',
+            'y': 'float',
+            'angle_degrees': 'float',
+            'angle_radians': 'float'
+        }
+    }
+
+    def __init__(self):
+        super().__init__()
+        self.setup_ui()
+        format_manager.add_observer(self.on_format_changed)
+
+    def setup_ui(self):
+        layout = QVBoxLayout(self)
+        self.setStyleSheet("""
+            FormatEditorPanel {
+                background-color: #f5f5f5;
+                border-radius: 5px;
+                padding: 5px;
+            }
+            QFrame {
+                background-color: white;
+                border: 1px solid #ccc;
+                border-radius: 3px;
+            }
+            QLabel {
+                color: #333;
+            }
+            QPushButton {
+                padding: 5px 10px;
+                border-radius: 3px;
+            }
+            QLineEdit {
+                padding: 5px;
+                border: 1px solid #ddd;
+                border-radius: 3px;
+                background-color: white;
+            }
+        """)
+
+        # タイトル
+        title_label = QLabel("Format Editor")
+        title_label.setStyleSheet("""
+            QLabel {
+                font-size: 14px;
+                font-weight: bold;
+                padding: 5px;
+                background-color: #e0e0e0;
+                border-radius: 3px;
+            }
+        """)
+
+        # メインコンテンツエリア
+        content_frame = QFrame()
+        content_layout = QVBoxLayout(content_frame)
+
+        # バージョン入力
+        version_layout = QHBoxLayout()
+        version_label = QLabel("Version:")
+        self.version_input = QLineEdit()
+        version_layout.addWidget(version_label)
+        version_layout.addWidget(self.version_input)
+        content_layout.addLayout(version_layout)
+
+        # フォーマット編集エリア
+        format_label = QLabel("Format Fields:")
+        content_layout.addWidget(format_label)
+
+        # フィールドリストを表示するウィジェット
+        self.fields_widget = QWidget()
+        self.fields_layout = QVBoxLayout(self.fields_widget)
+        
+        # スクロールエリアの設定
+        scroll_area = QScrollArea()
+        scroll_area.setWidget(self.fields_widget)
+        scroll_area.setWidgetResizable(True)
+        scroll_area.setStyleSheet("""
+            QScrollArea {
+                border: 1px solid #ccc;
+                background-color: white;
+            }
+        """)
+        content_layout.addWidget(scroll_area)
+
+        # フィールド追加ボタン
+        add_field_button = QPushButton("Add Field")
+        add_field_button.setStyleSheet("""
+            QPushButton {
+                background-color: #4CAF50;
+                color: white;
+            }
+            QPushButton:hover {
+                background-color: #45a049;
+            }
+        """)
+        add_field_button.clicked.connect(self.add_field)
+        content_layout.addWidget(add_field_button)
+
+        # ボタンレイアウト
+        button_layout = QHBoxLayout()
+        
+        # 更新ボタン
+        update_button = QPushButton("Update Format")
+        update_button.setStyleSheet("""
+            QPushButton {
+                background-color: #2196F3;
+                color: white;
+            }
+            QPushButton:hover {
+                background-color: #1976D2;
+            }
+        """)
+        update_button.clicked.connect(self.update_format)
+        
+        # リセットボタン
+        reset_button = QPushButton("Reset to Default")
+        reset_button.setStyleSheet("""
+            QPushButton {
+                background-color: #f44336;
+                color: white;
+            }
+            QPushButton:hover {
+                background-color: #da190b;
+            }
+        """)
+        reset_button.clicked.connect(self.reset_to_default)
+
+        button_layout.addWidget(update_button)
+        button_layout.addWidget(reset_button)
+
+        layout.addWidget(title_label)
+        layout.addWidget(content_frame)
+        layout.addLayout(button_layout)
+
+        # 初期フォーマットを表示
+        self.show_current_format()
+
+    def create_field_widget(self, name="", type_="int"):
+        field_widget = QFrame()
+        field_layout = QHBoxLayout(field_widget)
+        
+        # フィールド名入力
+        name_input = QLineEdit(name)
+        name_input.setPlaceholderText("Field name")
+        
+        # タイプ選択コンボボックス
+        type_combo = QComboBox()
+        type_combo.addItems(["int", "float", "string"])
+        type_combo.setCurrentText(type_)
+        
+        # 削除ボタン
+        delete_button = QPushButton("×")
+        delete_button.setFixedSize(25, 25)
+        delete_button.setStyleSheet("""
+            QPushButton {
+                background-color: #ff6b6b;
+                color: white;
+                border-radius: 12px;
+                font-weight: bold;
+            }
+            QPushButton:hover {
+                background-color: #ff5252;
+            }
+        """)
+        delete_button.clicked.connect(lambda: field_widget.deleteLater())
+        
+        field_layout.addWidget(name_input)
+        field_layout.addWidget(type_combo)
+        field_layout.addWidget(delete_button)
+        
+        return field_widget
+
+    def add_field(self):
+        self.fields_layout.addWidget(self.create_field_widget())
+
+    def show_current_format(self):
+        format_data = format_manager.get_format()
+        
+        # バージョンを設定
+        self.version_input.setText(format_data['version'])
+        
+        # 既存のフィールドをクリア
+        while self.fields_layout.count():
+            widget = self.fields_layout.takeAt(0).widget()
+            if widget:
+                widget.deleteLater()
+        
+        # フィールドを追加
+        for name, type_ in format_data['format'].items():
+            self.fields_layout.addWidget(self.create_field_widget(name, type_))
+
+    def update_format(self):
+        try:
+            new_format = {
+                'version': self.version_input.text(),
+                'format': {}
+            }
+            
+            # 各フィールドウィジェットから情報を収集
+            for i in range(self.fields_layout.count()):
+                field_widget = self.fields_layout.itemAt(i).widget()
+                if field_widget:
+                    name_input = field_widget.findChild(QLineEdit)
+                    type_combo = field_widget.findChild(QComboBox)
+                    if name_input and type_combo and name_input.text():
+                        new_format['format'][name_input.text()] = type_combo.currentText()
+            
+            # フォーマットを更新
+            format_manager.set_format(new_format)
+            self.format_updated.emit(new_format)
+            
+            QMessageBox.information(self, "Success", "Format updated successfully")
+        except Exception as e:
+            QMessageBox.warning(self, "Error", f"Invalid format: {str(e)}")
+
+    def reset_to_default(self):
+        """デフォルトのフォーマットに戻す"""
+        response = QMessageBox.question(
+            self,
+            "Reset Format",
+            "Are you sure you want to reset to default format?",
+            QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No
+        )
+        
+        if response == QMessageBox.StandardButton.Yes:
+            format_manager.set_format(self.DEFAULT_FORMAT)
+            self.show_current_format()
+
+    def on_format_changed(self, new_format):
+        self.show_current_format()
 
 def main():
     """アプリケーションのメインエントリーポイント"""
@@ -2374,5 +2630,3 @@ def main():
 
 if __name__ == '__main__':
     main()
-
-
