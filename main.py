@@ -686,8 +686,8 @@ class ImageViewer(QWidget):
         scale_x = self.drawing_layer.pixmap.width() / pixmap_geometry.width()
         scale_y = self.drawing_layer.pixmap.height() / pixmap_geometry.height()
         
-        scaled_start = QPoint(int(start_pos.x() * scale_x), int(start_pos.y() * scale_y))
-        scaled_end = QPoint(int(end_pos.x() * scale_x), int(end_pos.y() * scale_y))
+        scaled_start = QPoint(int(start_pos.x() * scale_x), int(start_pos.y() * scale_x))
+        scaled_end = QPoint(int(end_pos.x() * scale_x), int(end_pos.y() * scale_x))
 
         # スケールに応じて描画サイズを調整
         scaled_pen_size = int(self.pen_size * scale_x)
@@ -1533,15 +1533,39 @@ class RightPanel(QWidget):
             self.scroll_region = None
 
     def auto_scroll(self):
-        """自動スクロールの処理"""
-        if not hasattr(self, 'scroll_region'):
+        """自動スクロールの処理 - スクロール速度を動的に調整"""
+        if not hasattr(self, 'scroll_region') or not hasattr(self, 'scroll_area'):
             return
         
         scroll_bar = self.scroll_area.verticalScrollBar()
         current = scroll_bar.value()
         
-        # スクロール速度を調整
-        scroll_speed = 5
+        # スクロール速度を計算
+        # マウス位置に基づいて速度を調整（0.0 〜 1.0の範囲）
+        cursor_pos = self.scroll_area.mapFromGlobal(QCursor.pos())
+        viewport_height = self.scroll_area.height()
+        
+        # スクロール領域のマージン（この範囲でスクロール速度が変化）
+        margin = 50
+        
+        if self.scroll_region == 'up':
+            # 上端からの距離に基づいて速度を計算
+            distance = max(0, cursor_pos.y())
+            speed_factor = 1.0 - (distance / margin)
+        else:  # 'down'
+            # 下端からの距離に基づいて速度を計算
+            distance = max(0, viewport_height - cursor_pos.y())
+            speed_factor = 1.0 - (distance / margin)
+            
+        # 速度係数を0.0から1.0の範囲に制限
+        speed_factor = max(0.0, min(1.0, speed_factor))
+        
+        # 基本スクロール速度と最大スクロール速度
+        base_speed = 5
+        max_speed = 30
+        
+        # 実際のスクロール速度を計算
+        scroll_speed = int(base_speed + (max_speed - base_speed) * speed_factor)
         
         if self.scroll_region == 'up':
             new_value = max(scroll_bar.minimum(), current - scroll_speed)
@@ -1810,14 +1834,14 @@ class WaypointListItem(QWidget):
         super().mouseMoveEvent(event)
 
     def dragMoveEvent(self, event):
-        # ドラッグ中のマウス位置を取得して自動スクロールの判定
+        """ドラッグ中の自動スクロール制御を改善"""
         right_panel = self.get_right_panel()
         if right_panel and hasattr(right_panel, 'scroll_area'):
             scroll_area = right_panel.scroll_area
             pos_in_scroll = scroll_area.mapFromGlobal(QCursor.pos())
             
-            # スクロール領域の上下端から30ピクセルの範囲を自動スクロール領域とする
-            scroll_margin = 30
+            # スクロール領域のマージンを広げる
+            scroll_margin = 50
             
             if pos_in_scroll.y() < scroll_margin:
                 right_panel.scroll_region = 'up'
