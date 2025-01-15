@@ -523,6 +523,7 @@ class ImageViewer(QWidget):
     waypoint_added = Signal(Waypoint)  # ウェイポイント追加通知用のシグナル
     waypoint_removed = Signal(int)  # 削除シグナルを追加
     waypoint_edited = Signal(Waypoint)  # 編集完了シグナルを追加
+    history_changed = Signal(bool, bool)  # (can_undo, can_redo)
     
     def __init__(self):
         super().__init__()
@@ -532,6 +533,8 @@ class ImageViewer(QWidget):
         self.pen_color = Qt.GlobalColor.black
         self.pen_size = 2       # デフォルトのペンサイズ
         self.eraser_size = 10   # デフォルトの消しゴムサイズ
+        self.is_drawing = False  # 描画中フラグを追加
+        self.current_drawing_points = []  # 現在の描画ストロークを保存
         
         # スクロールエリアを最初に初期化
         self.scroll_area = CustomScrollArea()
@@ -593,6 +596,11 @@ class ImageViewer(QWidget):
         # シグナルを接続
         self.pgm_display.waypoint_edited.connect(self.handle_waypoint_edited)
         self.scroll_area.scale_changed.connect(self.handle_scale_change)
+
+        # 履歴管理用の変数を追加
+        self.history = []  # 操作履歴
+        self.current_index = -1  # 現在の履歴インデックス
+        self.max_history = 50  # 最大履歴数
 
     def setup_display(self):
         """画像表示用ラベルの設定を集約"""
@@ -778,7 +786,7 @@ class ImageViewer(QWidget):
         # スクロールエリアの描画モードを設定
         self.scroll_area.set_drawing_mode(mode != DrawingMode.NONE)
         # カーソルを更新
-        if mode != DrawingMode.NONE:
+        if (mode != DrawingMode.NONE):
             if (mode == DrawingMode.WAYPOINT):
                 self.pgm_display.setCursor(Qt.CursorShape.CrossCursor)
             else:
@@ -788,6 +796,9 @@ class ImageViewer(QWidget):
         """2点間に線を描画"""
         if not self.drawing_layer.pixmap or self.drawing_mode == DrawingMode.NONE:
             return
+
+        # 描画前の状態を保存
+        old_pixmap = self.drawing_layer.pixmap.copy()
 
         pixmap_geometry = self.pgm_display.geometry()
         scale_x = self.drawing_layer.pixmap.width() / pixmap_geometry.width()
@@ -811,6 +822,13 @@ class ImageViewer(QWidget):
         painter.end()
 
         self.update_display()
+
+        # 描画後の状態を履歴に追加
+        self.add_to_history({
+            'type': 'draw',
+            'old_pixmap': old_pixmap,
+            'new_pixmap': self.drawing_layer.pixmap.copy()
+        })
 
     def mousePressEvent(self, event):
         if self.drawing_mode != DrawingMode.NONE:
@@ -903,6 +921,12 @@ class ImageViewer(QWidget):
         
         self.waypoint_added.emit(waypoint)
         self.update_display()
+
+        # 履歴に追加
+        self.add_to_history({
+            'type': 'waypoint_add',
+            'waypoint': waypoint
+        })
 
     def update_waypoint(self, waypoint):
         """ウェイポイントの更新（角度変更時）"""
@@ -1273,11 +1297,32 @@ class ImageViewer(QWidget):
 
     def handle_waypoint_edited(self, waypoint):
         """ウェイポイント編集時の処理"""
+        # 編集前の状態を保存
+        old_state = {
+            'pixel_x': waypoint.pixel_x,
+            'pixel_y': waypoint.pixel_y,
+            'angle': waypoint.angle
+        }
+
         if self.origin_point:  # 原点が設定されている場合
             origin_x, origin_y = self.origin_point
             waypoint.update_metric_coordinates(origin_x, origin_y, self.resolution)
         self.waypoint_edited.emit(waypoint)
         self.update_display()
+
+        # 編集後の状態を履歴に追加
+        new_state = {
+            'pixel_x': waypoint.pixel_x,
+            'pixel_y': waypoint.pixel_y,
+            'angle': waypoint.angle
+        }
+
+        self.add_to_history({
+            'type': 'waypoint_edit',
+            'waypoint': waypoint,
+            'old_state': old_state,
+            'new_state': new_state
+        })
 
     def enter_edit_mode(self, waypoint):
         """ウェイポイントの編集モードに入る"""
@@ -1390,6 +1435,97 @@ class ImageViewer(QWidget):
             
             QToolTip.hideText()
 
+    def add_to_history(self, action):
+        """履歴に操作を追加"""
+        # 現在位置より後の履歴を削除
+        self.history = self.history[:self.current_index + 1]
+        
+        # 履歴に追加
+        self.history.append(action)
+        
+        # 最大履歴数を超えた場合、古い履歴を削除
+        if len(self.history) > self.max_history:
+            self.history.pop(0)
+        else:
+            self.current_index += 1
+            
+        # 履歴状態を通知
+        self.history_changed.emit(
+            self.can_undo(),
+            self.can_redo()
+        )
+    
+    def can_undo(self):
+        """操作を戻せるかどうか"""
+        return self.current_index >= 0
+    
+    def can_redo(self):
+        """操作を進められるかどうか"""
+        return self.current_index < len(self.history) - 1
+    
+    def undo(self):
+        """操作を戻す"""
+        if not self.can_undo():
+            return
+            
+        action = self.history[self.current_index]
+        self.current_index -= 1
+        
+        if action['type'] == 'waypoint_add':
+            self.remove_waypoint(action['waypoint'].number)
+        elif action['type'] == 'waypoint_remove':
+            # ウェイポイントを復元
+            self.waypoints.append(action['waypoint'])
+            self.waypoint_added.emit(action['waypoint'])
+        elif action['type'] == 'waypoint_edit':
+            # 以前の状態に戻す
+            waypoint = action['waypoint']
+            old_state = action['old_state']
+            waypoint.pixel_x = old_state['pixel_x']
+            waypoint.pixel_y = old_state['pixel_y']
+            waypoint.angle = old_state['angle']
+            if self.origin_point:
+                origin_x, origin_y = self.origin_point
+                waypoint.update_metric_coordinates(origin_x, origin_y, self.resolution)
+            self.waypoint_edited.emit(waypoint)
+        elif action['type'] == 'draw':
+            # 描画レイヤーを以前の状態に戻す
+            self.drawing_layer.pixmap = action['old_pixmap']
+            
+        self.update_display()
+        self.history_changed.emit(self.can_undo(), self.can_redo())
+    
+    def redo(self):
+        """操作を進める"""
+        if not self.can_redo():
+            return
+            
+        self.current_index += 1
+        action = self.history[self.current_index]
+        
+        if action['type'] == 'waypoint_add':
+            self.waypoints.append(action['waypoint'])
+            self.waypoint_added.emit(action['waypoint'])
+        elif action['type'] == 'waypoint_remove':
+            self.remove_waypoint(action['waypoint'].number)
+        elif action['type'] == 'waypoint_edit':
+            # 新しい状態に進める
+            waypoint = action['waypoint']
+            new_state = action['new_state']
+            waypoint.pixel_x = new_state['pixel_x']
+            waypoint.pixel_y = new_state['pixel_y']
+            waypoint.angle = new_state['angle']
+            if self.origin_point:
+                origin_x, origin_y = self.origin_point
+                waypoint.update_metric_coordinates(origin_x, origin_y, self.resolution)
+            self.waypoint_edited.emit(waypoint)
+        elif action['type'] == 'draw':
+            # 描画レイヤーを新しい状態に進める
+            self.drawing_layer.pixmap = action['new_pixmap']
+            
+        self.update_display()
+        self.history_changed.emit(self.can_undo(), self.can_redo())
+
 class MenuPanel(QWidget):
     """メニューパネル
     ファイル操作とズーム制御のUIを提供"""
@@ -1398,6 +1534,8 @@ class MenuPanel(QWidget):
     file_selected = Signal(str)  # ファイル選択時のシグナル
     zoom_value_changed = Signal(int)  # ズーム値変更時のシグナル
     yaml_selected = Signal(str)  # YAMLファイル選択用のシグナルを追加
+    undo_requested = Signal()  # 戻るボタン用シグナル
+    redo_requested = Signal()  # 進むボタン用シグナル
     
     def __init__(self, parent=None):
         super().__init__(parent)
@@ -1414,11 +1552,61 @@ class MenuPanel(QWidget):
         file_menu = QMenu("File", self)
         edit_menu = QMenu("Edit", self)
         
+        # 戻る/進むボタンの追加
+        button_layout = QHBoxLayout()
+        
+        self.undo_button = QPushButton("↩ Undo")
+        self.undo_button.setEnabled(False)  # 初期状態は無効
+        self.undo_button.clicked.connect(self.undo_requested.emit)
+        self.undo_button.setStyleSheet("""
+            QPushButton {
+                background-color: #f0f0f0;
+                border: 1px solid #ccc;
+                border-radius: 3px;
+                padding: 5px 10px;
+                min-width: 80px;
+            }
+            QPushButton:disabled {
+                background-color: #e0e0e0;
+                color: #999;
+            }
+        """)
+        
+        self.redo_button = QPushButton("Redo ↪")
+        self.redo_button.setEnabled(False)  # 初期状態は無効
+        self.redo_button.clicked.connect(self.redo_requested.emit)
+        self.redo_button.setStyleSheet("""
+            QPushButton {
+                background-color: #f0f0f0;
+                border: 1px solid #ccc;
+                border-radius: 3px;
+                padding: 5px 10px;
+                min-width: 80px;
+            }
+            QPushButton:disabled {
+                background-color: #e0e0e0;
+                color: #999;
+            }
+        """)
+        
+        # button_layout.addWidget(self.undo_button)
+        # button_layout.addWidget(self.redo_button)
+        # button_layout.addStretch()  # 残りのスペースを埋める
+        
         # ファイルメニューのアクションを作成
         open_action = file_menu.addAction("Open PGM")
         save_action = file_menu.addAction("Save PGM")
         file_menu.addSeparator()
         exit_action = file_menu.addAction("Exit")
+        
+        # 編集メニューにUndo/Redoアクションを追加
+        undo_action = edit_menu.addAction("Undo")
+        undo_action.setShortcut("Ctrl+Z")
+        undo_action.triggered.connect(self.undo_requested.emit)
+        
+        redo_action = edit_menu.addAction("Redo")
+        redo_action.setShortcut("Ctrl+Shift+Z")
+        redo_action.triggered.connect(self.redo_requested.emit)
         
         menu_bar.addMenu(file_menu)
         menu_bar.addMenu(edit_menu)
@@ -1443,6 +1631,7 @@ class MenuPanel(QWidget):
         zoom_widget = self.create_zoom_controls()
         
         layout.addWidget(menu_bar)
+        # layout.addLayout(button_layout)  # 戻る/進むボタンを追加
         layout.addLayout(file_layout)  # ファイル選択部分を追加
         layout.addWidget(zoom_widget)
 
@@ -1462,6 +1651,9 @@ class MenuPanel(QWidget):
             }
         """)
         file_layout.addWidget(self.grid_button)  # file_layoutにグリッドボタンを追加
+        
+        file_layout.addWidget(self.undo_button)
+        file_layout.addWidget(self.redo_button)
 
         self.setLayout(layout)
 
@@ -1520,6 +1712,11 @@ class MenuPanel(QWidget):
         )
         if file_name:
             self.yaml_selected.emit(file_name)
+
+    def update_undo_redo_actions(self, can_undo, can_redo):
+        """Undo/Redoボタンの状態を更新"""
+        self.undo_button.setEnabled(can_undo)
+        self.redo_button.setEnabled(can_redo)
 
 # LayerControlウィジェットを追加
 class LayerControl(QWidget):
@@ -2296,6 +2493,13 @@ class MainWindow(QMainWindow):
         # YAMLファイル選択時の処理を接続
         self.menu_panel.yaml_selected.connect(self.load_yaml_file)
 
+        # 戻る/進むボタンのシグナルを接続
+        self.menu_panel.undo_requested.connect(self.image_viewer.undo)
+        self.menu_panel.redo_requested.connect(self.image_viewer.redo)
+        
+        # 履歴状態の変更を監視
+        self.image_viewer.history_changed.connect(self.update_history_buttons)
+
         # 左側レイアウトの構成
         left_layout.addWidget(self.menu_panel)
         left_layout.addWidget(self.image_viewer)
@@ -2559,6 +2763,10 @@ class MainWindow(QMainWindow):
             
         except Exception as e:
             QMessageBox.critical(self, "Error", f"Error importing waypoints: {str(e)}")
+
+    def update_history_buttons(self, can_undo, can_redo):
+        """戻る/進むボタンの状態を更新"""
+        self.menu_panel.update_undo_redo_actions(can_undo, can_redo)
 
 # WAYPOINTのフォーマット定義を動的に変更可能にする
 class FormatManager:
