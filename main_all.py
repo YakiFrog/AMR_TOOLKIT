@@ -2598,15 +2598,6 @@ class FormatEditorPanel(QFrame):
     def __init__(self):
         super().__init__()
         self.setAutoFillBackground(True)
-        # パレットを設定
-        palette = self.palette()
-        palette.setColor(self.backgroundRole(), QColor("#f5f5f5"))
-        self.setPalette(palette)
-        
-        # フレームスタイルを設定
-        self.setFrameStyle(QFrame.Shape.Box | QFrame.Shadow.Raised)
-        self.setLineWidth(1)
-        
         # デフォルトのフォーマットを保存
         self.default_format = {
             'version': '1.0',
