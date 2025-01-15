@@ -2597,6 +2597,7 @@ class FormatEditorPanel(QWidget):
 
     def __init__(self):
         super().__init__()
+        
         # デフォルトのフォーマットを保存
         self.default_format = {
             'version': '1.0',
@@ -2627,8 +2628,9 @@ class FormatEditorPanel(QWidget):
             }
         """)
 
-        # コンテンツエリア（白い背景のコンテナ）
+        # コンテンツエリアの最小高さを設定し、スタイルを修正
         content_widget = QWidget()
+        content_widget.setMinimumHeight(200)  # 最小高さを設定
         content_widget.setStyleSheet("""
             QWidget {
                 background-color: white;
@@ -2636,20 +2638,32 @@ class FormatEditorPanel(QWidget):
                 border-radius: 3px;
                 padding: 10px;
             }
+            QTextEdit {
+                font-family: monospace;
+                font-size: 13pt;
+                border: 1px solid #ccc;
+                border-radius: 3px;
+                padding: 5px;
+                background-color: white;
+                min-height: 150px;  /* テキストエディタの最小高さ */
+            }
         """)
-        content_layout = QVBoxLayout(content_widget)
-        content_layout.setSpacing(10)
-        
+
         # 編集エリア
         self.editor = QTextEdit()
         self.editor.setStyleSheet("""
             QTextEdit {
                 font-family: monospace;
+                font-size: 13pt;
                 border: 1px solid #ccc;
                 border-radius: 3px;
                 padding: 5px;
             }
         """)
+
+        # スクロールポリシーを設定
+        self.editor.setVerticalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOn)
+        self.editor.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAsNeeded)
 
         # ボタンのレイアウト
         button_layout = QHBoxLayout()
@@ -2725,6 +2739,7 @@ class FormatEditorPanel(QWidget):
         button_layout.addWidget(import_button)
         
         # コンテンツレイアウトに要素を追加
+        content_layout = QVBoxLayout(content_widget)
         content_layout.addWidget(self.editor)
         content_layout.addLayout(button_layout)
 
