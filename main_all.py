@@ -1625,21 +1625,39 @@ class RightPanel(QWidget):
             }
         """)
         
-        self.layer_list = QWidget()
-        self.layer_list.setStyleSheet("""
-            QWidget {
+        # スクロールエリアを追加
+        scroll_area = QScrollArea()
+        scroll_area.setWidgetResizable(True)
+        scroll_area.setStyleSheet("""
+            QScrollArea {
                 background-color: white;
                 border: 1px solid #ccc;
                 border-radius: 3px;
             }
         """)
+        
+        # レイヤーリストのコンテナ
+        self.layer_list = QWidget()
+        self.layer_list.setStyleSheet("""
+            QWidget {
+                background-color: white;
+                padding: 5px;
+            }
+        """)
         self.layer_list_layout = QVBoxLayout(self.layer_list)
-        self.layer_list_layout.setSpacing(5)  # ウィジェット間のスペースを設定
-        self.layer_list.setMinimumHeight(100)
+        self.layer_list_layout.setSpacing(5)
+        self.layer_list_layout.setAlignment(Qt.AlignmentFlag.AlignTop)
+        
+        # スクロールエリアにレイヤーリストを設定
+        scroll_area.setWidget(self.layer_list)
+        
+        # 高さの設定
+        scroll_area.setMinimumHeight(150)
+        scroll_area.setMaximumHeight(200)
         
         layout.addWidget(title_label)
-        layout.addWidget(self.layer_list)
-        layout.setSpacing(5)  # タイトルとリスト間のスペースを設定
+        layout.addWidget(scroll_area)
+        layout.setSpacing(5)
         
         return widget
 
