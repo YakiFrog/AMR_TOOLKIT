@@ -2592,11 +2592,20 @@ class FormatManager:
 # FormatManagerのグローバルインスタンス
 format_manager = FormatManager()
 
-class FormatEditorPanel(QWidget):
+class FormatEditorPanel(QFrame):
     format_updated = Signal(dict)  # フォーマット更新時のシグナル
 
     def __init__(self):
         super().__init__()
+        self.setAutoFillBackground(True)
+        # パレットを設定
+        palette = self.palette()
+        palette.setColor(self.backgroundRole(), QColor("#f5f5f5"))
+        self.setPalette(palette)
+        
+        # フレームスタイルを設定
+        self.setFrameStyle(QFrame.Shape.Box | QFrame.Shadow.Raised)
+        self.setLineWidth(1)
         
         # デフォルトのフォーマットを保存
         self.default_format = {
@@ -2613,12 +2622,12 @@ class FormatEditorPanel(QWidget):
         format_manager.add_observer(self.on_format_changed)
 
     def setup_ui(self):
-        layout = QVBoxLayout(self)
-        layout.setSpacing(5)
-        
-        # タイトル
-        title_label = QLabel("Format Editor")
-        title_label.setStyleSheet("""
+        # パネル自体のスタイルを設定
+        self.setStyleSheet("""
+            FormatEditorPanel {
+                background-color: #f5f5f5;
+                border-radius: 5px;
+            }
             QLabel {
                 font-size: 14px;
                 font-weight: bold;
@@ -2626,13 +2635,7 @@ class FormatEditorPanel(QWidget):
                 background-color: #e0e0e0;
                 border-radius: 3px;
             }
-        """)
-
-        # コンテンツエリアの最小高さを設定し、スタイルを修正
-        content_widget = QWidget()
-        content_widget.setMinimumHeight(200)  # 最小高さを設定
-        content_widget.setStyleSheet("""
-            QWidget {
+            QWidget#contentWidget {
                 background-color: white;
                 border: 1px solid #ccc;
                 border-radius: 3px;
@@ -2640,32 +2643,36 @@ class FormatEditorPanel(QWidget):
             }
             QTextEdit {
                 font-family: monospace;
-                font-size: 13pt;
+                font-size: 15pt;
                 border: 1px solid #ccc;
                 border-radius: 3px;
                 padding: 5px;
                 background-color: white;
-                min-height: 150px;  /* テキストエディタの最小高さ */
+                min-height: 150px;
             }
         """)
 
-        # 編集エリア
+        layout = QVBoxLayout(self)
+        layout.setSpacing(5)
+        layout.setContentsMargins(10, 10, 10, 10)  # マージンを追加
+        
+        # タイトル
+        title_label = QLabel("Format Editor")
+        
+        # コンテンツエリア
+        content_widget = QWidget()
+        content_widget.setObjectName("contentWidget")  # スタイルシートで参照するためのID
+        content_widget.setMinimumHeight(200)
+        
+        content_layout = QVBoxLayout(content_widget)
+        content_layout.setContentsMargins(10, 10, 10, 10)
+        
+        # エディタ
         self.editor = QTextEdit()
-        self.editor.setStyleSheet("""
-            QTextEdit {
-                font-family: monospace;
-                font-size: 13pt;
-                border: 1px solid #ccc;
-                border-radius: 3px;
-                padding: 5px;
-            }
-        """)
-
-        # スクロールポリシーを設定
         self.editor.setVerticalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOn)
         self.editor.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAsNeeded)
 
-        # ボタンのレイアウト
+        # ボタンレイアウト
         button_layout = QHBoxLayout()
         
         # 更新ボタン
@@ -2739,7 +2746,6 @@ class FormatEditorPanel(QWidget):
         button_layout.addWidget(import_button)
         
         # コンテンツレイアウトに要素を追加
-        content_layout = QVBoxLayout(content_widget)
         content_layout.addWidget(self.editor)
         content_layout.addLayout(button_layout)
 
