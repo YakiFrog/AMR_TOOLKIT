@@ -1,0 +1,3 @@
+([('WaypointEditor',
+   '/Users/kotaniryota/ProgramLocal/Sotsuken/py_ver/dist/WaypointEditor',
+   'EXECUTABLE')],)

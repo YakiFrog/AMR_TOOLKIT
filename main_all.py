@@ -2646,6 +2646,7 @@ class MainWindow(QMainWindow):
     def handle_export(self, export_pgm, export_waypoints):
         """エクスポート処理"""
         if export_pgm:
+            # PGM & YAMLのエクスポート
             self.export_pgm_with_drawings()
         if export_waypoints:
             self.export_waypoints_yaml()
@@ -2666,35 +2667,35 @@ class MainWindow(QMainWindow):
                 # グレースケールに変換して保存
                 gray_image = image.convertToFormat(QImage.Format.Format_Grayscale8)
                 gray_image.save(file_name, "PGM")
-                
-    def convert_value(self, value, type_info):
-        """値を指定された型に変換する"""
-        type_converters = {
-            'int': int,
-            'float': float,
-            'str': str,
-            'bool': bool
-        }
-        try:
-            if type_info in type_converters:
-                return type_converters[type_info](value)
-            return value
-        except (ValueError, TypeError):
-            return value
-        
-    def get_waypoint_value(self, waypoint, key, type_info):
-        """ウェイポイントの値を取得して型変換する"""
-        value_map = {
-            'number': lambda wp: wp.number,
-            'x': lambda wp: wp.x,
-            'y': lambda wp: wp.y,
-            'angle_degrees': lambda wp: wp.angle * 180 / np.pi,
-            'angle_radians': lambda wp: wp.angle
-        }
-        if key in value_map:
-            raw_value = value_map[key](waypoint)
-            return self.convert_value(raw_value, type_info)
-        return None
+
+                # 関連するYAMLファイルを作成
+                yaml_file_name = os.path.splitext(file_name)[0] + '.yaml'
+                pgm_file_name = os.path.basename(file_name)
+
+                # YAMLデータの作成
+                yaml_data = {
+                    'image': pgm_file_name,
+                    'mode': 'trinary',
+                    'resolution': self.image_viewer.resolution,
+                    'origin': [0, 0, 0],  # デフォルト値
+                    'negate': 0,
+                    'occupied_thresh': 0.65,
+                    'free_thresh': 0.25
+                }
+
+                # 原点情報が存在する場合は更新
+                if self.image_viewer.origin_point:
+                    origin_x = -self.image_viewer.origin_point[0] * self.image_viewer.resolution
+                    origin_y = -(self.image_viewer.pgm_layer.pixmap.height() - 
+                               self.image_viewer.origin_point[1]) * self.image_viewer.resolution
+                    yaml_data['origin'] = [origin_x, origin_y, 0]
+
+                # YAMLファイルを保存
+                try:
+                    with open(yaml_file_name, 'w') as f:
+                        yaml.dump(yaml_data, f, default_flow_style=None)
+                except Exception as e:
+                    QMessageBox.warning(self, "Error", f"Error saving YAML file: {str(e)}")
 
     def export_waypoints_yaml(self):
         """ウェイポイントをYAMLファイルとしてエクスポート"""

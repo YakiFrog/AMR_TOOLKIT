@@ -1,0 +1,18 @@
+[[source]]
+url = "https://pypi.org/simple"
+verify_ssl = true
+name = "pypi"
+
+[packages]
+pillow = "==11.1.0"
+pyside6-addons = "==6.8.1.1"
+pyside6-essentials = "==6.8.1.1"
+shiboken6 = "==6.8.1.1"
+pyside6 = "*"
+numpy = "*"
+pyyaml = "*"
+
+[dev-packages]
+
+[requires]
+python_version = "3.11"
