@@ -19,6 +19,18 @@ COMMON_STYLES = """
     }
 """
 
+# Waypointのエクスポート/インポートフォーマット定義
+WAYPOINT_FORMAT = {
+    'version': '1.0',
+    'format': {
+        'number': 'int',
+        'x': 'float',
+        'y': 'float',
+        'angle_degrees': 'float',
+        'angle_radians': 'float'
+    }
+}
+
 # 共通のレイアウト設定
 LAYOUT_MARGINS = 8
 WIDGET_SPACING = 5
@@ -32,24 +44,12 @@ MIN_SCALE = 0.02  # 1/50 (スライダー値1に対応)
 MAX_SCALE = 2.0   # 100/50 (スライダー値100に対応)
 DEFAULT_SCALE = 1.0  # 50/50 (スライダー値50に対応)
 
-# Waypointのエクスポート/インポートフォーマット定義
-WAYPOINT_FORMAT = {
-    'version': '1.0',
-    'format': {
-        'number': 'int',
-        'x': 'float',
-        'y': 'float',
-        'angle_degrees': 'float',
-        'angle_radians': 'float'
-    }
-}
-
-# 描画モードの定数
 class DrawingMode(Enum):
+    """"描画モードを定義"""
     NONE = 0
     PEN = 1
     ERASER = 2
-    WAYPOINT = 3  # ウェイポイントモードを追加
+    WAYPOINT = 3
 
 class Waypoint:
     """ウェイポイントを管理するクラス"""
@@ -492,7 +492,7 @@ class DrawableLabel(QLabel):
                                 self.parent_viewer.waypoint_edited.emit(waypoint)
                     break
 
-class Layer(QWidget):  # QObjectを継承してシグナルを使用可能に
+class Layer(QWidget):  
     """レイヤークラス"""
     changed = Signal()  # レイヤーの状態変更通知用シグナル
     
@@ -1718,7 +1718,6 @@ class MenuPanel(QWidget):
         self.undo_button.setEnabled(can_undo)
         self.redo_button.setEnabled(can_redo)
 
-# LayerControlウィジェットを追加
 class LayerControl(QWidget):
     def __init__(self, layer, parent=None):
         super().__init__(parent)
@@ -2769,7 +2768,6 @@ class MainWindow(QMainWindow):
         """戻る/進むボタンの状態を更新"""
         self.menu_panel.update_undo_redo_actions(can_undo, can_redo)
 
-# WAYPOINTのフォーマット定義を動的に変更可能にする
 class FormatManager:
     def __init__(self):
         self._format = {
