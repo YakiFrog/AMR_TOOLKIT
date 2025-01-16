@@ -1275,7 +1275,7 @@ class ImageViewer(QWidget):
             while parent and not isinstance(parent, MainWindow):
                 parent = parent.parent()
                 
-            if parent and parent.analysis_panel.generate_path_button.isChecked():
+            if parent and parent.right_panel.generate_path_button.isChecked():
                 if self.waypoints and len(self.waypoints) >= 2:
                     painter = QPainter(self.path_layer.pixmap)
                     painter.setRenderHint(QPainter.RenderHint.Antialiasing)
@@ -2505,11 +2505,11 @@ class MainWindow(QMainWindow):
         left_widget.setLayout(left_layout)
         
         # 右側パネル
-        self.analysis_panel = RightPanel()
+        self.right_panel = RightPanel()
         
         # スプリッタの設定
         splitter.addWidget(left_widget)
-        splitter.addWidget(self.analysis_panel)
+        splitter.addWidget(self.right_panel)
         splitter.setSizes([600, 400])
         
         main_layout.addWidget(splitter)
@@ -2523,38 +2523,38 @@ class MainWindow(QMainWindow):
         self.update_layer_panel()  # この行を追加
 
         # ウェイポイント追加時の処理を接続
-        self.image_viewer.waypoint_added.connect(self.analysis_panel.add_waypoint_to_list)
+        self.image_viewer.waypoint_added.connect(self.right_panel.add_waypoint_to_list)
 
         # ウェイポイント削除時の処理を接続
-        self.image_viewer.waypoint_removed.connect(self.analysis_panel.remove_waypoint_from_list)
+        self.image_viewer.waypoint_removed.connect(self.right_panel.remove_waypoint_from_list)
         
         # 削除ボタンクリック時の処理を接続（修正版）
-        self.analysis_panel.waypoint_delete_requested.connect(self.image_viewer.remove_waypoint)
+        self.right_panel.waypoint_delete_requested.connect(self.image_viewer.remove_waypoint)
 
         # 全ウェイポイント削除時の処理を接続
-        self.analysis_panel.all_waypoints_delete_requested.connect(self.image_viewer.remove_all_waypoints)
+        self.right_panel.all_waypoints_delete_requested.connect(self.image_viewer.remove_all_waypoints)
 
         # ウェイポイントの順序変更時の処理を接続
-        self.analysis_panel.waypoint_reorder_requested.connect(
+        self.right_panel.waypoint_reorder_requested.connect(
             self.image_viewer.reorder_waypoints)
 
         # パス生成時の処理を接続
-        self.analysis_panel.generate_path_requested.connect(
+        self.right_panel.generate_path_requested.connect(
             self.image_viewer.generate_path)
 
         # ウェイポイント編集時の処理を接続
-        self.image_viewer.waypoint_edited.connect(self.analysis_panel.add_waypoint_to_list)
+        self.image_viewer.waypoint_edited.connect(self.right_panel.add_waypoint_to_list)
 
         # エクスポート時の処理を接続
-        self.analysis_panel.export_requested.connect(self.handle_export)
+        self.right_panel.export_requested.connect(self.handle_export)
 
         # インポート時の処理を接続
-        self.analysis_panel.waypoint_import_requested.connect(self.import_waypoints_yaml)
+        self.right_panel.waypoint_import_requested.connect(self.import_waypoints_yaml)
 
     def update_layer_panel(self):
         """レイヤーパネルの表示を更新"""
-        if hasattr(self, 'analysis_panel') and hasattr(self, 'image_viewer'):
-            self.analysis_panel.update_layer_list(self.image_viewer.layers)
+        if hasattr(self, 'right_panel') and hasattr(self, 'image_viewer'):
+            self.right_panel.update_layer_list(self.image_viewer.layers)
 
     def load_pgm_file(self, file_path):
         """PGMファイルを読み込む
