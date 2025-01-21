@@ -95,8 +95,8 @@ class Waypoint:
         rel_y = origin_y - self.pixel_y  # y軸は反転
 
         # メートル単位に変換
-        self.x = rel_x * resolution
-        self.y = rel_y * resolution
+        self.x = rel_x 
+        self.y = rel_y
         self.update_display_name()
 
     def renumber(self, new_number):
@@ -1175,11 +1175,11 @@ class ImageViewer(QWidget):
 
         # 原点からの相対位置を計算
         origin_x, origin_y = self.origin_point
-        rel_x = (pixel_x - origin_x) * self.resolution
-        rel_y = (origin_y - pixel_y) * self.resolution  # y軸は反転
+        rel_x = (pixel_x - origin_x)
+        rel_y = (origin_y - pixel_y) # y軸は反転
         
         # 座標を表示（ピクセル座標と相対座標）
-        self.coord_label.setText(f"Pixel: ({pixel_x}, {pixel_y})\nMetric: ({rel_x:.2f}, {rel_y:.2f})")
+        self.coord_label.setText(f"Pixel: ({pixel_x}, {pixel_y})\nMetric: ({rel_x:.0f}, {rel_y:.0f})")
         self.coord_label.show()
 
     def load_yaml_file(self, file_path):
@@ -2767,6 +2767,41 @@ class MainWindow(QMainWindow):
     def update_history_buttons(self, can_undo, can_redo):
         """戻る/進むボタンの状態を更新"""
         self.menu_panel.update_undo_redo_actions(can_undo, can_redo)
+
+    def get_waypoint_value(self, waypoint, key, type_info):
+        """ウェイポイントから指定されたキーの値を取得し、適切な型に変換"""
+        if key == 'number':
+            return waypoint.number
+        elif key == 'x':
+            return waypoint.x
+        elif key == 'y':
+            return waypoint.y
+        elif key == 'angle_degrees':
+            return float(waypoint.angle * 180 / np.pi)
+        elif key == 'angle_radians':
+            return float(waypoint.angle)
+        else:
+            # カスタム属性の場合
+            value = waypoint.get_attribute(key, None)
+            if value is not None:
+                return self.convert_value(value, type_info)
+        return None
+
+    def convert_value(self, value, type_info):
+        """値を指定された型に変換"""
+        try:
+            if type_info == 'int':
+                return int(value)
+            elif type_info == 'float':
+                return float(value)
+            elif type_info == 'str':
+                return str(value)
+            elif type_info == 'bool':
+                return bool(value)
+            else:
+                return value
+        except (ValueError, TypeError):
+            return value
 
 class FormatManager:
     def __init__(self):
