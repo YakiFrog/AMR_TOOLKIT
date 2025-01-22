@@ -1380,8 +1380,8 @@ class ImageViewer(QWidget):
                     y_meters = wp_data['y']
                     
                     # メートル座標からピクセル座標に変換
-                    pixel_x = int(origin_x + (x_meters / self.resolution))
-                    pixel_y = int(origin_y - (y_meters / self.resolution))
+                    pixel_x = int(origin_x + x_meters)
+                    pixel_y = int(origin_y - y_meters)
                     
                     # 角度の取得（度からラジアンに変換）
                     angle = np.radians(wp_data['angle_degrees'])
