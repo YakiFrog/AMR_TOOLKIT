@@ -2,5 +2,5 @@
 
 <!-- 画像はめ込み -->
 ![Map and Waypoint Editor](
-    image/window.png
+    image/0124.png
 )
