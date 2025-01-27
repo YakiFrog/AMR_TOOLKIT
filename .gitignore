@@ -7,3 +7,4 @@ build
 dist
 pyvenv.cfg
 __pycache__
+.DS_Store
