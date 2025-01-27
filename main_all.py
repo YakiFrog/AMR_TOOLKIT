@@ -11,6 +11,7 @@ from PySide6.QtCore import Qt, QPoint, Signal, QEvent, QSize, QMimeData, QTimer,
 from PySide6.QtGui import (QPixmap, QImage, QWheelEvent, QPainter, QPen, QCursor,
                           QDrag, QColor)  # QDragをQtGuiからインポート
 from enum import Enum
+from collections import OrderedDict
 
 # 共通のスタイル定義
 COMMON_STYLES = """
@@ -23,13 +24,18 @@ COMMON_STYLES = """
 WAYPOINT_FORMAT = {
     'version': '1.0',
     'format': {
-        'number': 'int',
-        'x': 'float',
-        'y': 'float',
-        'angle_degrees': 'float',
-        'angle_radians': 'float'
+        'number': 'int',      # ウェイポイントの番号
+        'x': 'float',         # X座標 (メートル)
+        'y': 'float',         # Y座標 (メートル) 
+        'angle_radians': 'float',  # 角度 (ラジアン)
     }
 }
+
+# OrderedDictへの変換
+WAYPOINT_FORMAT = OrderedDict([
+    ('version', WAYPOINT_FORMAT['version']),
+    ('format', OrderedDict(WAYPOINT_FORMAT['format']))
+])
 
 # 共通のレイアウト設定
 LAYOUT_MARGINS = 8
@@ -2620,7 +2626,7 @@ class MainWindow(QMainWindow):
             if 'image' in yaml_data:
                 pgm_filename = yaml_data['image']
                 # 相対パスの場合はYAMLファイルのディレクトリを基準に絶対パスを構築
-                if not os.path.isabs(pgm_filename):
+                if not os.path.isabs(pgm_filename):  # !を notに修正
                     pgm_path = os.path.join(yaml_dir, pgm_filename)
                 else:
                     pgm_path = pgm_filename
@@ -2661,7 +2667,7 @@ class MainWindow(QMainWindow):
         if file_name:
             # ImageViewerの現在の表示内容をPGMとして保存
             pixmap = self.image_viewer.get_combined_pixmap()
-            if pixmap:
+            if (pixmap):
                 image = pixmap.toImage()
                 # グレースケールに変換して保存
                 gray_image = image.convertToFormat(QImage.Format.Format_Grayscale8)
@@ -2709,30 +2715,31 @@ class MainWindow(QMainWindow):
             current_format = format_manager.get_format()
             
             for wp in self.image_viewer.waypoints:
-                # 基本属性を取得
-                waypoint_data = {
-                    key: self.get_waypoint_value(wp, key, type_info)
-                    for key, type_info in current_format['format'].items()
-                    if self.get_waypoint_value(wp, key, type_info) is not None
-                }
+                # 基本属性を取得（順序を保持）
+                waypoint_data = OrderedDict()
+                for key in current_format['format'].keys():
+                    value = self.get_waypoint_value(wp, key, current_format['format'][key])
+                    if value is not None:
+                        waypoint_data[key] = value
                 
-                # カスタム属性を追加
-                for key, value in wp.attributes.items():
-                    if key in current_format['format']:
+                # カスタム属性を追加（順序を保持）
+                for key in current_format['format'].keys():
+                    if key in wp.attributes:
                         try:
-                            # フォーマットに従って型変換を試みる
-                            converted_value = self.convert_value(value, current_format['format'][key])
+                            converted_value = self.convert_value(
+                                wp.attributes[key], 
+                                current_format['format'][key]
+                            )
                             waypoint_data[key] = converted_value
                         except:
-                            # 変換に失敗した場合は文字列のまま保存
-                            waypoint_data[key] = value
+                            waypoint_data[key] = wp.attributes[key]
                 
                 waypoints_data.append(waypoint_data)
             
-            data = {
-                'format_version': current_format['version'],
-                'waypoints': waypoints_data
-            }
+            data = OrderedDict([
+                ('format_version', current_format['version']),
+                ('waypoints', waypoints_data)
+            ])
             
             try:
                 with open(file_name, 'w') as f:
@@ -2744,22 +2751,30 @@ class MainWindow(QMainWindow):
         """Waypointの設定をYAMLファイルからインポート"""
         try:
             with open(file_path, 'r') as f:
+                # 順序を保持してYAMLを読み込む
                 data = yaml.safe_load(f)
+                # データをOrderedDictに変換
+                ordered_data = OrderedDict()
+                for key in data:
+                    if key == 'waypoints':
+                        ordered_data[key] = [OrderedDict(wp) for wp in data[key]]
+                    else:
+                        ordered_data[key] = data[key]
             
             current_format = format_manager.get_format()
             
-            if 'format_version' in data:
-                if data['format_version'] != current_format['version']:
+            if 'format_version' in ordered_data:
+                if ordered_data['format_version'] != current_format['version']:
                     response = QMessageBox.question(
                         self,
                         "Version Mismatch",
-                        f"File format version ({data['format_version']}) differs from current version ({current_format['version']}). Continue?",
+                        f"File format version ({ordered_data['format_version']}) differs from current version ({current_format['version']}). Continue?",
                         QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No
                     )
                     if response == QMessageBox.StandardButton.No:
                         return
             
-            self.image_viewer.import_waypoints_from_yaml(data)
+            self.image_viewer.import_waypoints_from_yaml(ordered_data)
             
         except Exception as e:
             QMessageBox.critical(self, "Error", f"Error importing waypoints: {str(e)}")
@@ -2776,8 +2791,6 @@ class MainWindow(QMainWindow):
             return waypoint.x
         elif key == 'y':
             return waypoint.y
-        elif key == 'angle_degrees':
-            return float(waypoint.angle * 180 / np.pi)
         elif key == 'angle_radians':
             return float(waypoint.angle)
         else:
@@ -2805,23 +2818,24 @@ class MainWindow(QMainWindow):
 
 class FormatManager:
     def __init__(self):
-        self._format = {
-            'version': '1.0',
-            'format': {
-                'number': 'int',
-                'x': 'float',
-                'y': 'float',
-                'angle_degrees': 'float',
-                'angle_radians': 'float'
-            }
-        }
+        self._format = WAYPOINT_FORMAT
         self._observers = []
 
     def get_format(self):
         return self._format
 
     def set_format(self, new_format):
-        self._format = new_format
+        # 辞書をOrderedDictに変換
+        if isinstance(new_format, dict):
+            ordered_format = OrderedDict()
+            for key in new_format:
+                if key == 'format' and isinstance(new_format[key], dict):
+                    ordered_format[key] = OrderedDict(new_format[key])
+                else:
+                    ordered_format[key] = new_format[key]
+            self._format = ordered_format
+        else:
+            self._format = new_format
         self._notify_observers()
 
     def add_observer(self, observer):
@@ -2841,16 +2855,7 @@ class FormatEditorPanel(QFrame):
         super().__init__()
         self.setAutoFillBackground(True)
         # デフォルトのフォーマットを保存
-        self.default_format = {
-            'version': '1.0',
-            'format': {
-                'number': 'int',
-                'x': 'float',
-                'y': 'float',
-                'angle_degrees': 'float',
-                'angle_radians': 'float'
-            }
-        }
+        self.default_format = WAYPOINT_FORMAT
         self.setup_ui()
         format_manager.add_observer(self.on_format_changed)
 
@@ -2997,20 +3002,41 @@ class FormatEditorPanel(QFrame):
         QMessageBox.information(self, "Success", "Format reset to default")
 
     def show_current_format(self):
-        format_text = yaml.dump(format_manager.get_format(), default_flow_style=False)
-        self.editor.setText(format_text)
+        """現在のフォーマットを表示"""
+        # カスタムYAML表示形式を使用
+        format_data = format_manager.get_format()
+        formatted_text = (
+            f"version: '{format_data['version']}'\n"
+            f"format:\n"
+        )
+        
+        # format内の各項目を整形
+        for key, value in format_data['format'].items():
+            formatted_text += f"  {key}: {value}\n"
+        
+        self.editor.setText(formatted_text)
 
     def update_format(self):
         try:
             # テキストをYAMLとしてパース
             new_format = yaml.safe_load(self.editor.toPlainText())
+            # OrderedDictに変換して順序を保持
+            ordered_format = OrderedDict([
+                ('version', new_format['version']),
+                ('format', OrderedDict())
+            ])
+            
+            # format内の項目を順序を保持して変換
+            for key, value in new_format['format'].items():
+                ordered_format['format'][key] = value
+            
             # 必要なキーの存在チェック
-            if 'version' not in new_format or 'format' not in new_format:
+            if 'version' not in ordered_format or 'format' not in ordered_format:
                 raise ValueError("Format must contain 'version' and 'format' keys")
             
             # フォーマットを更新
-            format_manager.set_format(new_format)
-            self.format_updated.emit(new_format)
+            format_manager.set_format(ordered_format)
+            self.format_updated.emit(ordered_format)
             
             # 成功メッセージを表示
             QMessageBox.information(self, "Success", "Format updated successfully")
@@ -3027,8 +3053,13 @@ class FormatEditorPanel(QFrame):
         )
         if file_name:
             try:
+                # カスタム形式でフォーマットを書き出し
+                format_data = format_manager.get_format()
                 with open(file_name, 'w') as f:
-                    f.write(self.editor.toPlainText())
+                    f.write(f"version: '{format_data['version']}'\n")
+                    f.write("format:\n")
+                    for key, value in format_data['format'].items():
+                        f.write(f"  {key}: {value}\n")
                 QMessageBox.information(self, "Success", "Format exported successfully")
             except Exception as e:
                 QMessageBox.warning(self, "Error", f"Error exporting format: {str(e)}")
