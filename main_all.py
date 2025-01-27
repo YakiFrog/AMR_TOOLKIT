@@ -2876,7 +2876,7 @@ class FormatEditorPanel(QFrame):
             }
             QTextEdit {
                 font-family: monospace;
-                font-size: 15pt;
+                font-size: 13pt;
                 border: 1px solid #ccc;
                 border-radius: 3px;
                 padding: 5px;
