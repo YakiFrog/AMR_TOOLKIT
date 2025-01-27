@@ -1389,8 +1389,8 @@ class ImageViewer(QWidget):
                     pixel_x = int(origin_x + x_meters)
                     pixel_y = int(origin_y - y_meters)
                     
-                    # 角度の取得（度からラジアンに変換）
-                    angle = np.radians(wp_data['angle_degrees'])
+                    # 角度の取得
+                    angle = wp_data['angle_radians']
                     
                     # 新しいウェイポイントを作成
                     waypoint = Waypoint(pixel_x, pixel_y, angle)
@@ -2715,37 +2715,28 @@ class MainWindow(QMainWindow):
             current_format = format_manager.get_format()
             
             for wp in self.image_viewer.waypoints:
-                # 基本属性を取得（順序を保持）
-                waypoint_data = OrderedDict()
+                # 基本属性を辞書として作成
+                waypoint_data = {}
                 for key in current_format['format'].keys():
                     value = self.get_waypoint_value(wp, key, current_format['format'][key])
                     if value is not None:
                         waypoint_data[key] = value
-                
-                # カスタム属性を追加（順序を保持）
-                for key in current_format['format'].keys():
-                    if key in wp.attributes:
-                        try:
-                            converted_value = self.convert_value(
-                                wp.attributes[key], 
-                                current_format['format'][key]
-                            )
-                            waypoint_data[key] = converted_value
-                        except:
-                            waypoint_data[key] = wp.attributes[key]
-                
+                        
                 waypoints_data.append(waypoint_data)
             
-            data = OrderedDict([
-                ('format_version', current_format['version']),
-                ('waypoints', waypoints_data)
-            ])
+            # 通常の辞書としてデータを構築
+            data = {
+                'format_version': current_format['version'],
+                'waypoints': waypoints_data
+            }
             
             try:
                 with open(file_name, 'w') as f:
-                    yaml.dump(data, f, default_flow_style=False, sort_keys=False)
+                    # default_flow_style=Falseで階層構造を維持
+                    yaml.dump(data, f, default_flow_style=False)
             except Exception as e:
                 print(f"Error saving waypoints YAML: {str(e)}")
+                QMessageBox.critical(self, "Error", f"Failed to save waypoints: {str(e)}")
 
     def import_waypoints_yaml(self, file_path):
         """Waypointの設定をYAMLファイルからインポート"""
