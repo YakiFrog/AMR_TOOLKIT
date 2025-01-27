@@ -25,7 +25,7 @@ source bin/activate
 pip install -r requirements.txt
 ```
 
-### Run
+## Run
 ```bash
 python3 main_all.py
 ```
