@@ -97,8 +97,8 @@ class Waypoint:
         self.resolution = resolution
         
         # 原点からの相対位置をピクセルで計算
-        rel_x = self.pixel_x - origin_x
-        rel_y = origin_y - self.pixel_y  # y軸は反転
+        rel_x = (self.pixel_x - origin_x) / 20
+        rel_y = (-self.pixel_y + origin_y) / 20 # Y軸を反転
 
         # メートル単位に変換
         self.x = rel_x 
@@ -1181,11 +1181,11 @@ class ImageViewer(QWidget):
 
         # 原点からの相対位置を計算
         origin_x, origin_y = self.origin_point
-        rel_x = (pixel_x - origin_x)
-        rel_y = (origin_y - pixel_y) # y軸は反転
+        rel_x = (pixel_x - origin_x) / 20
+        rel_y = (origin_y - pixel_y) / 20
         
         # 座標を表示（ピクセル座標と相対座標）
-        self.coord_label.setText(f"Pixel: ({pixel_x}, {pixel_y})\nMetric: ({rel_x:.0f}, {rel_y:.0f})")
+        self.coord_label.setText(f"Pixel: ({pixel_x}, {pixel_y})\nMetric: ({rel_x:.2f}, {rel_y:.2f})")
         self.coord_label.show()
 
     def load_yaml_file(self, file_path):
@@ -1382,8 +1382,8 @@ class ImageViewer(QWidget):
                 # ピクセル座標を計算
                 if self.origin_point and hasattr(self, 'resolution'):
                     origin_x, origin_y = self.origin_point
-                    x_meters = wp_data['x']
-                    y_meters = wp_data['y']
+                    x_meters = wp_data['x'] * 20
+                    y_meters = wp_data['y'] * 20
                     
                     # メートル座標からピクセル座標に変換
                     pixel_x = int(origin_x + x_meters)
@@ -2786,9 +2786,9 @@ class MainWindow(QMainWindow):
         if key == 'number':
             return waypoint.number
         elif key == 'x':
-            return waypoint.x
+            return round(float(waypoint.x), 3)
         elif key == 'y':
-            return waypoint.y
+            return round(float(waypoint.y), 3)
         elif key == 'angle_radians':
             return round(float(waypoint.angle), 3) 
         else:
