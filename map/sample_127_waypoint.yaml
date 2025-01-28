@@ -15,5 +15,5 @@ waypoints:
 - number: 4
   x: 216
   y: 141
-  angle_radians: -0.0461211160145112
+  angle_radians: -0.046
   rotate: 100

@@ -2790,7 +2790,7 @@ class MainWindow(QMainWindow):
         elif key == 'y':
             return waypoint.y
         elif key == 'angle_radians':
-            return float(waypoint.angle)
+            return round(float(waypoint.angle), 3) 
         else:
             # カスタム属性の場合
             value = waypoint.get_attribute(key, None)
