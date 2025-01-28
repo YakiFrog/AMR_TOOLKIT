@@ -1,14 +1,19 @@
 format_version: '1.0'
 waypoints:
-- angle_radians: -0.5700404636997103
-  number: 1
-  x: 44
-  y: 314
-- angle_radians: -0.05449145624073119
-  number: 2
-  x: 122
-  y: 264
-- angle_radians: -0.013512691013328216
-  number: 3
-  x: 161
-  y: 196
+- number: 1
+  x: 12
+  y: 70
+  angle_radians: 0.0
+- number: 2
+  x: 216
+  y: 70
+  angle_radians: 0.0
+- number: 3
+  x: 293
+  y: 70
+  angle_radians: 0.0
+- number: 4
+  x: 216
+  y: 141
+  angle_radians: -0.0461211160145112
+  rotate: 100

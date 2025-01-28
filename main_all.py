@@ -2711,20 +2711,22 @@ class MainWindow(QMainWindow):
             "YAML Files (*.yaml);;All Files (*)"
         )
         if file_name:
+            # OrderedDictの特別なシリアライザを定義
+            def ordered_dict_representer(dumper, data):
+                return dumper.represent_mapping('tag:yaml.org,2002:map', dict(data.items()))
+            yaml.add_representer(OrderedDict, ordered_dict_representer)
+            
             waypoints_data = []
-            current_format = format_manager.get_format()
+            current_format = format_manager.get_format() # 現在のフォーマットを取得
             
             for wp in self.image_viewer.waypoints:
-                # 基本属性を辞書として作成
                 waypoint_data = {}
                 for key in current_format['format'].keys():
                     value = self.get_waypoint_value(wp, key, current_format['format'][key])
                     if value is not None:
                         waypoint_data[key] = value
-                        
                 waypoints_data.append(waypoint_data)
             
-            # 通常の辞書としてデータを構築
             data = {
                 'format_version': current_format['version'],
                 'waypoints': waypoints_data
@@ -2732,8 +2734,13 @@ class MainWindow(QMainWindow):
             
             try:
                 with open(file_name, 'w') as f:
-                    # default_flow_style=Falseで階層構造を維持
-                    yaml.dump(data, f, default_flow_style=False)
+                    # デフォルトでPythonオブジェクトのタグを出力しないように設定
+                    yaml.SafeDumper.ignore_aliases = lambda *args: True
+                    yaml.dump(data, f, 
+                            default_flow_style=False,
+                            sort_keys=False,
+                            allow_unicode=True,
+                            Dumper=yaml.SafeDumper)
             except Exception as e:
                 print(f"Error saving waypoints YAML: {str(e)}")
                 QMessageBox.critical(self, "Error", f"Failed to save waypoints: {str(e)}")
