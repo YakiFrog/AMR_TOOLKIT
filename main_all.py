@@ -20,6 +20,15 @@ COMMON_STYLES = """
     }
 """
 
+WAYPOINT_SETTINGS = {
+    'BASE_SIZE': 10,           # 基本サイズ
+    'ARROW_LENGTH_MULT': 2.0,  # 矢印の長さ倍率
+    'ARROW_WIDTH_MULT': 0.7,   # 矢印の幅倍率
+    'FONT_SIZE_MAIN_MULT': 1.5,      # メイン文字サイズ
+    'FONT_SIZE_ATTR_MULT': 0.7,      # 属性文字サイズ
+    'EDIT_SIZE_MULT': 1.2,     # 編集時のサイズ倍率
+}
+
 # Waypointのエクスポート/インポートフォーマット定義
 WAYPOINT_FORMAT = {
     'version': '1.0',
@@ -985,7 +994,7 @@ class ImageViewer(QWidget):
             
             for waypoint in self.waypoints:
                 x, y = waypoint.pixel_x, waypoint.pixel_y
-                size = self.waypoint_size
+                base_size = WAYPOINT_SETTINGS['BASE_SIZE']
                 
                 # 編集中のウェイポイントは特別な表示
                 is_editing = (self.pgm_display.edit_mode and 
@@ -994,21 +1003,21 @@ class ImageViewer(QWidget):
                 
                 # 編集中は青色で表示
                 color = QColor(0, 120, 255, 255) if is_editing else QColor(255, 0, 0, 255)
-                size_multiplier = 1.2 if is_editing else 1.0
+                size_multiplier = WAYPOINT_SETTINGS['EDIT_SIZE_MULT'] if is_editing else 1.0
                 
                 # 矢印の描画
                 pen = QPen(color)
                 pen.setWidth(3)
                 painter.setPen(pen)
                 
-                adjusted_size = size * size_multiplier
-                angle_line_length = adjusted_size * 3
+                adjusted_size = base_size * size_multiplier
+                angle_line_length = adjusted_size * WAYPOINT_SETTINGS['ARROW_LENGTH_MULT'] # 矢印の長さ
                 end_x = x + int(angle_line_length * np.cos(waypoint.angle))
                 end_y = y - int(angle_line_length * np.sin(waypoint.angle))
                 painter.drawLine(x, y, end_x, end_y)
 
                 # 矢印の先端
-                arrow_size = adjusted_size // 2
+                arrow_size = adjusted_size * WAYPOINT_SETTINGS['ARROW_WIDTH_MULT']
                 arrow_angle1 = waypoint.angle + np.pi * 3/4
                 arrow_angle2 = waypoint.angle - np.pi * 3/4
                 
@@ -1029,7 +1038,7 @@ class ImageViewer(QWidget):
                 # 番号を描画
                 painter.setPen(QColor(255, 255, 255, 230))
                 font = self.font()
-                font.setPointSize(19)
+                font.setPointSize(WAYPOINT_SETTINGS['FONT_SIZE_MAIN_MULT'] * WAYPOINT_SETTINGS['BASE_SIZE'])
                 font.setBold(True)
                 painter.setFont(font)
                 number_text = str(waypoint.number)
@@ -1044,7 +1053,7 @@ class ImageViewer(QWidget):
                 num_attributes = len(waypoint.attributes)
                 if (num_attributes > 0):
                     painter.setPen(QColor(255, 255, 255))
-                    font.setPointSize(10)
+                    font.setPointSize(WAYPOINT_SETTINGS['FONT_SIZE_ATTR_MULT'] * WAYPOINT_SETTINGS['BASE_SIZE'])
                     font.setBold(True)
                     painter.setFont(font)
                     attr_text = str(num_attributes)
