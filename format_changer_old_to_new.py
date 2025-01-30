@@ -17,7 +17,7 @@ def convert_waypoints(input_file: str, output_file: str):
         x, y, _, _, _, qz, qw = point
         
         # ヨー角を計算
-        angle_radians = qz
+        angle_radians = quaternion_to_euler(qz, qw)
         
         # 新フォーマットのウェイポイントを作成
         waypoint = {
