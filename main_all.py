@@ -21,12 +21,12 @@ COMMON_STYLES = """
 """
 
 WAYPOINT_SETTINGS = {
-    'BASE_SIZE': 10,           # 基本サイズ
-    'ARROW_LENGTH_MULT': 2.0,  # 矢印の長さ倍率
-    'ARROW_WIDTH_MULT': 0.7,   # 矢印の幅倍率
-    'FONT_SIZE_MAIN_MULT': 1.5,      # メイン文字サイズ
-    'FONT_SIZE_ATTR_MULT': 0.7,      # 属性文字サイズ
-    'EDIT_SIZE_MULT': 1.2,     # 編集時のサイズ倍率
+    'BASE_SIZE': 8,           # 基本サイズ（少し小さく）
+    'ARROW_LENGTH_MULT': 2.0,  # 矢印の長さ倍率（少し短く）
+    'ARROW_WIDTH_MULT': 0.65,   # 矢印の幅倍率（少し細め）
+    'FONT_SIZE_MAIN_MULT': 1.3,      # メイン文字サイズ（少し小さく）
+    'FONT_SIZE_ATTR_MULT': 0.6,      # 属性文字サイズ（少し小さく）
+    'EDIT_SIZE_MULT': 1.15,     # 編集時のサイズ倍率（わずかに縮小）
 }
 
 # Waypointのエクスポート/インポートフォーマット定義
@@ -264,14 +264,7 @@ class DrawableLabel(QLabel):
 
         # 現在のツールのサイズを取得
         size = self.parent_viewer.pen_size if self.parent_viewer.drawing_mode == DrawingMode.PEN else self.parent_viewer.eraser_size
-        
-        # スケールに応じてカーソルサイズを調整（実際の描画サイズと同じになるように計算）
-        pixmap_geometry = self.geometry()
-        if self.parent_viewer.drawing_layer.pixmap:
-            scale_x = pixmap_geometry.width() / self.parent_viewer.drawing_layer.pixmap.width()
-            scaled_size = int(size * scale_x)
-        else:
-            scaled_size = size
+        scaled_size = int(size)  # pen_size/eraser_size は表示単位（ラベル上のピクセル）として扱う
             
         # サイズが変更された場合のみ新しいカーソルを作成
         if (scaled_size != self.current_cursor_size):
@@ -298,34 +291,33 @@ class DrawableLabel(QLabel):
         """ウェイポイントをダブルクリックして編集モードの切り替え"""
         if not self.parent_viewer or self.parent_viewer.drawing_mode != DrawingMode.NONE:
             return
-            
         pos = event.position().toPoint()
-        pixmap_geometry = self.geometry()
-        if self.parent_viewer.drawing_layer.pixmap:
-            scale_x = self.parent_viewer.drawing_layer.pixmap.width() / pixmap_geometry.width()
-            scale_y = self.parent_viewer.drawing_layer.pixmap.height() / pixmap_geometry.height()
-            x = int(pos.x() * scale_x)
-            y = int(pos.y() * scale_y)
-            
-            if self.edit_mode and self.editing_waypoint:
-                # 編集モードを終了
-                self.edit_mode = False
-                self.editing_waypoint = None
-                self.setCursor(Qt.CursorShape.ArrowCursor)
-                if self.parent_viewer:
-                    self.parent_viewer.update_display()  # 表示を更新して赤色に戻す
-            else:
-                # クリックされた位置にあるウェイポイントを探す
-                for waypoint in self.parent_viewer.waypoints:
-                    if abs(waypoint.pixel_x - x) < 15 and abs(waypoint.pixel_y - y) < 15:
-                        self.edit_mode = True
-                        self.editing_waypoint = waypoint
-                        self.setCursor(Qt.CursorShape.SizeAllCursor)
-                        # ステータスメッセージを表示
-                        if self.parent_viewer:
-                            self.parent_viewer.show_edit_message("ドラッグで移動、Shift+ドラッグで角度を変更")
-                            self.parent_viewer.update_display()  # 表示を更新して青色に変更
-                        break
+        im_pos = self.parent_viewer.display_to_image_coords(pos)
+        if im_pos is None:
+            return
+        x = im_pos.x()
+        y = im_pos.y()
+
+        if self.edit_mode and self.editing_waypoint:
+            # 編集モードを終了
+            self.edit_mode = False
+            self.editing_waypoint = None
+            self.setCursor(Qt.CursorShape.ArrowCursor)
+            if self.parent_viewer:
+                self.parent_viewer.update_display()  # 表示を更新して赤色に戻す
+        else:
+            # クリックされた位置にあるウェイポイントを探す
+            for waypoint in self.parent_viewer.waypoints:
+                hover_range = max(6, int(WAYPOINT_SETTINGS['BASE_SIZE'] * 1.6))
+                if abs(waypoint.pixel_x - x) < hover_range and abs(waypoint.pixel_y - y) < hover_range:
+                    self.edit_mode = True
+                    self.editing_waypoint = waypoint
+                    self.setCursor(Qt.CursorShape.SizeAllCursor)
+                    # ステータスメッセージを表示
+                    if self.parent_viewer:
+                        self.parent_viewer.show_edit_message("ドラッグで移動、Shift+ドラッグで角度を変更")
+                        self.parent_viewer.update_display()  # 表示を更新して青色に変更
+                    break
 
     def mousePressEvent(self, event):
         if self.drawing_enabled and self.parent_viewer:
@@ -340,24 +332,23 @@ class DrawableLabel(QLabel):
                 self.last_pos = pos
                 self.parent_viewer.draw_line(pos, pos)  # 点を描画
         elif self.edit_mode and self.editing_waypoint:
-            pos = event.position().toPoint()  # 修正
-            pixmap_geometry = self.geometry()
-            if self.parent_viewer.drawing_layer.pixmap:
-                scale_x = self.parent_viewer.drawing_layer.pixmap.width() / pixmap_geometry.width()
-                scale_y = self.parent_viewer.drawing_layer.pixmap.height() / pixmap_geometry.height()
-                x = int(pos.x() * scale_x)
-                y = int(pos.y() * scale_y)
+            pos = event.position().toPoint()
+            im_pos = self.parent_viewer.display_to_image_coords(pos)
+            if im_pos is None:
+                return
+            x = im_pos.x()
+            y = im_pos.y()
 
-                if event.modifiers() & Qt.KeyboardModifier.ShiftModifier:
-                    # Shiftキーが押されている場合は角度編集モード
-                    self.is_editing_angle = True
-                    self.editing_start_pos = pos
-                else:
-                    # 通常クリックは位置の移動
-                    self.editing_waypoint.set_position(x, y)
-                    if self.parent_viewer:
-                        self.parent_viewer.update_display()
-                        self.parent_viewer.waypoint_edited.emit(self.editing_waypoint)
+            if event.modifiers() & Qt.KeyboardModifier.ShiftModifier:
+                # Shiftキーが押されている場合は角度編集モード
+                self.is_editing_angle = True
+                self.editing_start_pos = pos
+            else:
+                # 通常クリックは位置の移動
+                self.editing_waypoint.set_position(x, y)
+                if self.parent_viewer:
+                    self.parent_viewer.update_display()
+                    self.parent_viewer.waypoint_edited.emit(self.editing_waypoint)
         else:
             super().mousePressEvent(event)
 
@@ -368,20 +359,18 @@ class DrawableLabel(QLabel):
         self.mouse_position_changed.emit(pos)
 
         if self.parent_viewer and self.parent_viewer.waypoints:
-            pixmap_geometry = self.geometry()
-            if self.parent_viewer.pgm_layer.pixmap:
-                scale_x = self.parent_viewer.pgm_layer.pixmap.width() / pixmap_geometry.width()
-                scale_y = self.parent_viewer.pgm_layer.pixmap.height() / pixmap_geometry.height()
-                
-                # スケールを考慮した座標に変換
-                x = int(pos.x() * scale_x)
-                y = int(pos.y() * scale_y)
-                
-                # ホバー検出範囲を設定
-                hover_range = 15  # ピクセル単位での検出範囲
-                
-                for waypoint in self.parent_viewer.waypoints:
-                    if abs(waypoint.pixel_x - x) < hover_range and abs(waypoint.pixel_y - y) < hover_range:
+            im_pos = self.parent_viewer.display_to_image_coords(pos)
+            if im_pos is None:
+                QToolTip.hideText()
+                return
+            x = im_pos.x()
+            y = im_pos.y()
+
+            # ホバー検出範囲を設定（ベースサイズに依存）
+            hover_range = max(6, int(WAYPOINT_SETTINGS['BASE_SIZE'] * 1.6))  # ピクセル単位での検出範囲
+
+            for waypoint in self.parent_viewer.waypoints:
+                if abs(waypoint.pixel_x - x) < hover_range and abs(waypoint.pixel_y - y) < hover_range:
                         if waypoint.attributes:
                             tooltip = "<b>Actions:</b><br>"
                             for key, value in waypoint.attributes.items():
@@ -414,27 +403,26 @@ class DrawableLabel(QLabel):
                 self.last_pos = pos
                 self.updateCursor()  # マウス移動時にカーソルを更新
         elif self.edit_mode and self.editing_waypoint:
-            pos = event.position().toPoint()  # 修正
-            pixmap_geometry = self.geometry()
-            if self.parent_viewer.drawing_layer.pixmap:
-                scale_x = self.parent_viewer.drawing_layer.pixmap.width() / pixmap_geometry.width()
-                scale_y = self.parent_viewer.drawing_layer.pixmap.height() / pixmap_geometry.height()
-                x = int(pos.x() * scale_x)
-                y = int(pos.y() * scale_y)
+            pos = event.position().toPoint()
+            im_pos = self.parent_viewer.display_to_image_coords(pos)
+            if im_pos is None:
+                return
+            x = im_pos.x()
+            y = im_pos.y()
 
-                if self.is_editing_angle:
-                    # 角度の計算
-                    dx = pos.x() - self.editing_start_pos.x()
-                    dy = -(pos.y() - self.editing_start_pos.y())  # Y軸を反転
-                    angle = np.arctan2(dy, dx)
-                    self.editing_waypoint.set_angle(angle)
-                else:
-                    # 位置の更新
-                    self.editing_waypoint.set_position(x, y)
+            if self.is_editing_angle:
+                # 角度の計算
+                dx = pos.x() - self.editing_start_pos.x()
+                dy = -(pos.y() - self.editing_start_pos.y())  # Y軸を反転
+                angle = np.arctan2(dy, dx)
+                self.editing_waypoint.set_angle(angle)
+            else:
+                # 位置の更新
+                self.editing_waypoint.set_position(x, y)
 
-                if self.parent_viewer:
-                    self.parent_viewer.update_display()
-                    self.parent_viewer.waypoint_edited.emit(self.editing_waypoint)
+            if self.parent_viewer:
+                self.parent_viewer.update_display()
+                self.parent_viewer.waypoint_edited.emit(self.editing_waypoint)
         else:
             super().mouseMoveEvent(event)
 
@@ -468,15 +456,15 @@ class DrawableLabel(QLabel):
 
         # クリックされた位置のウェイポイントを探す
         pos = event.pos()
-        pixmap_geometry = self.geometry()
-        if self.parent_viewer.drawing_layer.pixmap:
-            scale_x = self.parent_viewer.drawing_layer.pixmap.width() / pixmap_geometry.width()
-            scale_y = self.parent_viewer.drawing_layer.pixmap.height() / pixmap_geometry.height()
-            x = int(pos.x() * scale_x)
-            y = int(pos.y() * scale_y)
-            
-            for waypoint in self.parent_viewer.waypoints:
-                if abs(waypoint.pixel_x - x) < 15 and abs(waypoint.pixel_y - y) < 15:
+        im_pos = self.parent_viewer.display_to_image_coords(pos)
+        if im_pos is None:
+            return
+        x = im_pos.x()
+        y = im_pos.y()
+
+        for waypoint in self.parent_viewer.waypoints:
+            hover_range = max(6, int(WAYPOINT_SETTINGS['BASE_SIZE'] * 1.6))
+            if abs(waypoint.pixel_x - x) < hover_range and abs(waypoint.pixel_y - y) < hover_range:
                     menu = QMenu(self)
                     menu.setStyleSheet("""
                         QMenu {
@@ -815,16 +803,23 @@ class ImageViewer(QWidget):
         # 描画前の状態を保存
         old_pixmap = self.drawing_layer.pixmap.copy()
 
-        pixmap_geometry = self.pgm_display.geometry()
-        scale_x = self.drawing_layer.pixmap.width() / pixmap_geometry.width()
-        scale_y = self.drawing_layer.pixmap.height() / pixmap_geometry.height()
-        
-        scaled_start = QPoint(int(start_pos.x() * scale_x), int(start_pos.y() * scale_x))
-        scaled_end = QPoint(int(end_pos.x() * scale_x), int(end_pos.y() * scale_x))
+        # 開始/終了位置を画像ピクセル座標に変換
+        start_img = self.display_to_image_coords(start_pos)
+        end_img = self.display_to_image_coords(end_pos)
+        if start_img is None or end_img is None:
+            return
+        scaled_start = start_img
+        scaled_end = end_img
 
-        # スケールに応じて描画サイズを調整
-        scaled_pen_size = int(self.pen_size * scale_x)
-        scaled_eraser_size = int(self.eraser_size * scale_x)
+        # スケールに応じて描画サイズを調整（表示単位 -> 画像ピクセル単位）
+        if self.pgm_display.pixmap() and self.pgm_layer.pixmap:
+            orig_w = self.pgm_layer.pixmap.width()
+            disp_w = self.pgm_display.pixmap().width()
+            scale_factor = orig_w / disp_w if disp_w else 1.0
+        else:
+            scale_factor = 1.0
+        scaled_pen_size = max(1, int(self.pen_size * scale_factor))
+        scaled_eraser_size = max(1, int(self.eraser_size * scale_factor))
 
         painter = QPainter(self.drawing_layer.pixmap)
         if self.drawing_mode == DrawingMode.PEN:
@@ -908,16 +903,12 @@ class ImageViewer(QWidget):
         if not self.pgm_layer.pixmap:
             return
 
-        # 表示サイズからピクセル座標に変換
-        pixmap_geometry = self.pgm_display.geometry()
-        if self.pgm_layer.pixmap:
-            scale_x = self.pgm_layer.pixmap.width() / pixmap_geometry.width()
-            scale_y = self.pgm_layer.pixmap.height() / pixmap_geometry.height()
-            x = int(pos.x() * scale_x)
-            y = int(pos.y() * scale_y)
-        else:
-            x = pos.x()
-            y = pos.y()
+        # 表示座標 -> 画像上のピクセル座標に変換
+        im_pos = self.display_to_image_coords(pos)
+        if im_pos is None:
+            return  # 画像外クリックは無視
+        x = im_pos.x()
+        y = im_pos.y()
         
         waypoint = Waypoint(x, y)
         
@@ -1096,6 +1087,55 @@ class ImageViewer(QWidget):
         self.pgm_display.setPixmap(scaled_pixmap)
         self.pgm_display.adjustSize()
 
+    def get_displayed_pixmap_info(self):
+        """戻り値: (disp_w, disp_h, offset_x, offset_y, displayed_pixmap)
+        label 内に表示されているピクスマップの表示サイズとオフセットを返す
+        """
+        if not self.pgm_display or not self.pgm_display.pixmap() or not self.pgm_layer.pixmap:
+            return None
+
+        displayed_pm = self.pgm_display.pixmap()
+        disp_w = displayed_pm.width()
+        disp_h = displayed_pm.height()
+        label_w = self.pgm_display.width()
+        label_h = self.pgm_display.height()
+        offset_x = max(0, (label_w - disp_w) // 2)
+        offset_y = max(0, (label_h - disp_h) // 2)
+        return disp_w, disp_h, offset_x, offset_y, displayed_pm
+
+    def display_to_image_coords(self, pos: QPoint):
+        """ラベル上（表示）座標 -> 元画像（pixmap）ピクセル座標に変換
+        pos は QLabel のローカル座標（イベントの pos）
+        None を返す場合は画像外
+        """
+        info = self.get_displayed_pixmap_info()
+        if not info:
+            return None
+        disp_w, disp_h, offset_x, offset_y, displayed_pm = info
+        x_disp = pos.x() - offset_x
+        y_disp = pos.y() - offset_y
+        if x_disp < 0 or y_disp < 0 or x_disp >= disp_w or y_disp >= disp_h:
+            return None
+        orig_pm = self.pgm_layer.pixmap
+        orig_w = orig_pm.width()
+        orig_h = orig_pm.height()
+        img_x = int(x_disp * (orig_w / disp_w))
+        img_y = int(y_disp * (orig_h / disp_h))
+        return QPoint(img_x, img_y)
+
+    def image_to_display_coords(self, image_pos: QPoint):
+        """元画像（pixmap）ピクセル座標 -> ラベル上（表示）座標に変換"""
+        info = self.get_displayed_pixmap_info()
+        if not info:
+            return None
+        disp_w, disp_h, offset_x, offset_y, displayed_pm = info
+        orig_pm = self.pgm_layer.pixmap
+        orig_w = orig_pm.width()
+        orig_h = orig_pm.height()
+        x_disp = int(image_pos.x() * (disp_w / orig_w))
+        y_disp = int(image_pos.y() * (disp_h / orig_h))
+        return QPoint(x_disp + offset_x, y_disp + offset_y)
+
     def on_layer_changed(self):
         """レイヤーの状態が変更された時の処理"""
         self.update_display()
@@ -1179,14 +1219,13 @@ class ImageViewer(QWidget):
         """マウス位置の更新とラベル表示"""
         if not self.pgm_layer.pixmap or not self.origin_point:
             return
-
         # 表示座標からピクセル座標に変換
-        pixmap_geometry = self.pgm_display.geometry()
-        scale_x = self.pgm_layer.pixmap.width() / pixmap_geometry.width()
-        scale_y = self.pgm_layer.pixmap.height() / pixmap_geometry.height()
-        
-        pixel_x = int(pos.x() * scale_x)
-        pixel_y = int(pos.y() * scale_y)
+        im_pos = self.display_to_image_coords(pos)
+        if im_pos is None:
+            self.coord_label.hide()
+            return
+        pixel_x = im_pos.x()
+        pixel_y = im_pos.y()
 
         # 原点からの相対位置を計算
         origin_x, origin_y = self.origin_point
@@ -1428,18 +1467,14 @@ class ImageViewer(QWidget):
         
         # ウェイポイントのホバー判定とツールチップ表示
         if self.pgm_layer.pixmap:
-            pixmap_geometry = self.pgm_display.geometry()
-            scale_x = pixmap_geometry.width() / self.pgm_layer.pixmap.width()
-            mouse_pos = event.pos()
-            
-            # スケールを考慮した座標に変換
-            scaled_pos = QPoint(
-                int(mouse_pos.x() / scale_x),
-                int(mouse_pos.y() / scale_x)
-            )
-            
+            # イベントは ImageViewer のローカル座標なので QLabel のローカル座標へ変換
+            label_pos = self.pgm_display.mapFrom(self, event.pos())
+            im_pos = self.display_to_image_coords(label_pos)
+            if not im_pos:
+                QToolTip.hideText()
+                return
             for waypoint in self.waypoints:
-                if hasattr(waypoint, 'hover_rect') and waypoint.hover_rect.contains(scaled_pos):
+                if hasattr(waypoint, 'hover_rect') and waypoint.hover_rect.contains(im_pos):
                     # 属性情報のツールチップを作成
                     if waypoint.attributes:
                         tooltip = "Attributes:\n"
@@ -3179,6 +3214,9 @@ class AttributeDialog(QDialog):
 
 def main():
     """アプリケーションのメインエントリーポイント"""
+    # HiDPI / Wayland 対応: アプリケーションの属性を設定してスケーリングを有効化
+    QApplication.setAttribute(Qt.ApplicationAttribute.AA_EnableHighDpiScaling, True)
+    QApplication.setAttribute(Qt.ApplicationAttribute.AA_UseHighDpiPixmaps, True)
     app = QApplication(sys.argv)
     window = MainWindow()
     window.show()
