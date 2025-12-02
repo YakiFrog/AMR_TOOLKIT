@@ -37,6 +37,8 @@ WAYPOINT_FORMAT = {
         'x': 'float',         # X座標 (メートル)
         'y': 'float',         # Y座標 (メートル) 
         'angle_radians': 'float',  # 角度 (ラジアン)
+        'stop': 'bool',        # 停止フラグ
+        'change_map': 'string'  # マップ変更フラグ
     }
 }
 
@@ -603,7 +605,14 @@ class ImageViewer(QWidget):
         # 履歴管理用の変数を追加
         self.history = []  # 操作履歴
         self.current_index = -1  # 現在の履歴インデックス
-        self.max_history = 50  # 最大履歴数
+        self.max_history = 10  # 最大履歴数（メモリ節約のため削減）
+        
+        # パフォーマンス最適化用の変数
+        self._is_drawing_stroke = False  # ストローク描画中フラグ
+        self._stroke_old_pixmap = None   # ストローク開始時のpixmap
+        self._update_pending = False     # 更新待ちフラグ
+        self._cached_result = None       # 合成結果キャッシュ
+        self._cache_valid = False        # キャッシュ有効フラグ
 
     def setup_display(self):
         """画像表示用ラベルの設定を集約"""
@@ -800,8 +809,10 @@ class ImageViewer(QWidget):
         if not self.drawing_layer.pixmap or self.drawing_mode == DrawingMode.NONE:
             return
 
-        # 描画前の状態を保存
-        old_pixmap = self.drawing_layer.pixmap.copy()
+        # ストローク開始時のみpixmapを保存（メモリ節約）
+        if not self._is_drawing_stroke:
+            self._is_drawing_stroke = True
+            self._stroke_old_pixmap = self.drawing_layer.pixmap.copy()
 
         # 開始/終了位置を画像ピクセル座標に変換
         start_img = self.display_to_image_coords(start_pos)
@@ -831,14 +842,9 @@ class ImageViewer(QWidget):
         painter.drawLine(scaled_start, scaled_end)
         painter.end()
 
+        # キャッシュを無効化
+        self._cache_valid = False
         self.update_display()
-
-        # 描画後の状態を履歴に追加
-        self.add_to_history({
-            'type': 'draw',
-            'old_pixmap': old_pixmap,
-            'new_pixmap': self.drawing_layer.pixmap.copy()
-        })
 
     def mousePressEvent(self, event):
         if self.drawing_mode != DrawingMode.NONE:
@@ -859,6 +865,15 @@ class ImageViewer(QWidget):
 
     def mouseReleaseEvent(self, event):
         if self.drawing_mode != DrawingMode.NONE:
+            # ストローク終了時に履歴を追加（1ストロークで1履歴）
+            if self._is_drawing_stroke and self._stroke_old_pixmap is not None:
+                self.add_to_history({
+                    'type': 'draw',
+                    'old_pixmap': self._stroke_old_pixmap,
+                    'new_pixmap': self.drawing_layer.pixmap.copy()
+                })
+                self._stroke_old_pixmap = None
+            self._is_drawing_stroke = False
             self.last_point = None
             event.accept()
         else:
@@ -1072,16 +1087,23 @@ class ImageViewer(QWidget):
         
         painter.end()
 
-        # スケーリングして表示
+        # スケーリングして表示（巨大画像の場合はFastTransformationを使用）
         new_size = QSize(
             int(result.width() * self.scale_factor),
             int(result.height() * self.scale_factor)
         )
         
+        # 画像サイズに応じて変換品質を切り替え（パフォーマンス最適化）
+        # 巨大画像（2000x2000以上）や描画中はFastTransformationを使用
+        use_fast = (result.width() > 2000 or result.height() > 2000 or 
+                    self._is_drawing_stroke or self.scale_factor < 0.5)
+        transform_mode = (Qt.TransformationMode.FastTransformation if use_fast 
+                         else Qt.TransformationMode.SmoothTransformation)
+        
         scaled_pixmap = result.scaled(
             new_size,
             Qt.AspectRatioMode.KeepAspectRatio,
-            Qt.TransformationMode.SmoothTransformation  # スムージングを有効化
+            transform_mode
         )
         
         self.pgm_display.setPixmap(scaled_pixmap)
@@ -2778,13 +2800,27 @@ class MainWindow(QMainWindow):
             
             try:
                 with open(file_name, 'w') as f:
-                    # デフォルトでPythonオブジェクトのタグを出力しないように設定
-                    yaml.SafeDumper.ignore_aliases = lambda *args: True
+                    # boolとstringが正しく出力されるようにカスタムダンパーを設定
+                    class CleanDumper(yaml.SafeDumper):
+                        pass
+                    
+                    # boolはtrue/falseで出力（クォートなし）
+                    CleanDumper.add_representer(bool, 
+                        lambda dumper, data: dumper.represent_bool(data))
+                    
+                    # 文字列は必要な場合のみクォート（通常はクォートなし）
+                    def str_representer(dumper, data):
+                        # 空文字列や特殊文字を含む場合のみクォート
+                        if data == '' or any(c in data for c in ':{}[]&*#?|-<>=!%@\\'):
+                            return dumper.represent_scalar('tag:yaml.org,2002:str', data, style="'")
+                        return dumper.represent_scalar('tag:yaml.org,2002:str', data)
+                    CleanDumper.add_representer(str, str_representer)
+                    
                     yaml.dump(data, f, 
                             default_flow_style=False,
                             sort_keys=False,
                             allow_unicode=True,
-                            Dumper=yaml.SafeDumper)
+                            Dumper=CleanDumper)
             except Exception as e:
                 print(f"Error saving waypoints YAML: {str(e)}")
                 QMessageBox.critical(self, "Error", f"Failed to save waypoints: {str(e)}")
@@ -2839,7 +2875,12 @@ class MainWindow(QMainWindow):
             # カスタム属性の場合
             value = waypoint.get_attribute(key, None)
             if value is not None:
-                return self.convert_value(value, type_info)
+                converted = self.convert_value(value, type_info)
+                # 文字列が空の場合は出力しない（None返す）
+                # boolはtrue/false両方出力する
+                if (type_info == 'string' or type_info == 'str') and converted == '':
+                    return None
+                return converted
         return None
 
     def convert_value(self, value, type_info):
@@ -2849,9 +2890,13 @@ class MainWindow(QMainWindow):
                 return int(value)
             elif type_info == 'float':
                 return float(value)
-            elif type_info == 'str':
+            elif type_info == 'str' or type_info == 'string':
+                # 文字列として返す（YAMLでクォートなしで出力される）
                 return str(value)
             elif type_info == 'bool':
+                # 文字列の場合は適切にboolに変換
+                if isinstance(value, str):
+                    return value.lower() in ('true', '1', 'yes', 'on')
                 return bool(value)
             else:
                 return value
