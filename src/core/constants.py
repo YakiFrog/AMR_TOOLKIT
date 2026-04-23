@@ -170,7 +170,7 @@ SCALE_SENSITIVITY = 0.2
 
 # スケール関連の定数
 MIN_SCALE = 0.02  
-MAX_SCALE = 2.0   
+MAX_SCALE = 3.0   
 DEFAULT_SCALE = 1.0  
 
 # カラーパレット

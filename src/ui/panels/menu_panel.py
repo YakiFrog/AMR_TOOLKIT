@@ -160,7 +160,7 @@ class MenuPanel(QWidget):
         
         # ズームスライダーの設定
         self.zoom_slider = QSlider(Qt.Orientation.Horizontal)
-        self.zoom_slider.setRange(1, 100)
+        self.zoom_slider.setRange(1, 150)  # 50 = 100%, 150 = 300%
         self.zoom_slider.setValue(50)
         
         # ズーム率表示用ラベル

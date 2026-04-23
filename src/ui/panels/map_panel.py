@@ -819,7 +819,7 @@ class ImageViewer(QWidget):
 
     def handle_scale_change(self, factor):
         new_scale = self.scale_factor * factor
-        if 0.02 <= new_scale <= 2.0:
+        if MIN_SCALE <= new_scale <= MAX_SCALE:
             self.scale_factor = new_scale
             self.update_display()
             self.scale_changed.emit(self.scale_factor)
@@ -914,6 +914,9 @@ class ImageViewer(QWidget):
             if self.path_layer.visible and self.path_layer.pixmap:
                 painter.setOpacity(self.path_layer.opacity)
                 painter.drawPixmap(0, 0, self.path_layer.pixmap)
+            if self.origin_layer.visible and self.origin_layer.pixmap:
+                painter.setOpacity(self.origin_layer.opacity)
+                painter.drawPixmap(0, 0, self.origin_layer.pixmap)
             if self.waypoints and self.waypoint_layer.visible:
                 painter.setOpacity(self.waypoint_layer.opacity)
                 painter.setRenderHint(QPainter.RenderHint.Antialiasing)
