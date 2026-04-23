@@ -654,73 +654,43 @@ class ImageViewer(QWidget):
             super().mouseReleaseEvent(event)
 
     def load_colored_pgm(self, pgm_path, json_path):
-        """`.colored.json` のパレットを使用して PGM をカラー画像として読み込む"""
+        """`.colored.json` のパレットを使用して PGM をカラー画像として読み込む (完全コピーによる安定版)"""
         try:
             with open(json_path, 'r') as f:
                 palette_data = json.load(f)
             palette = palette_data.get('palette', [])
-            if not palette:
-                return None
+            if not palette: return None
             
-            # PGM (P5) のヘッダーを手動で解析してインデックス画像として精度よく読み込む
+            # PGM (P5) のヘッダーを手動で解析
             with open(pgm_path, 'rb') as f:
-                # ヘッダー解析 (P5, Width, Height, MaxVal)
-                line1 = f.readline().strip()
-                if line1 != b'P5':
-                    return None
-                    
-                # コメントをスキップ
+                header = f.readline().strip()
+                if header != b'P5': return None
                 line = f.readline()
-                while line.startswith(b'#'):
-                    line = f.readline()
-                
+                while line.startswith(b'#'): line = f.readline()
                 dims = line.split()
-                if len(dims) < 2:
-                    # 次の行に高さがある可能性
-                    line = f.readline()
-                    dims += line.split()
-                
-                width = int(dims[0])
-                height = int(dims[1])
-                
-                max_val_line = f.readline().strip()
-                max_val = int(max_val_line)
-                
-                # データの読み出し
+                if len(dims) < 2: dims += f.readline().split()
+                width, height = int(dims[0]), int(dims[1])
+                max_val = int(f.readline().strip())
                 raw_data = f.read()
-                
-            # 8-bit PGMを想定
-            if max_val > 255:
-                # 16-bit PGMの場合は上位バイトのみ使用（簡易処理）
-                img_data = np.frombuffer(raw_data, dtype='>u2').astype(np.uint8)
-            else:
-                img_data = np.frombuffer(raw_data, dtype=np.uint8)
+
+            # NumPyで高速にインデックスからRGBへ変換
+            img_data = np.frombuffer(raw_data, dtype=np.uint8).reshape((height, width))
+            palette_np = np.array(palette, dtype=np.uint8)
             
-            # リサイズ
-            img_data = img_data.reshape((height, width))
+            # インデックスの範囲外を丸める（安全策）
+            img_data = np.clip(img_data, 0, len(palette_np) - 1)
+            rgb_data = palette_np[img_data]
             
-            # QImage を作成
-            # インデックス画像として作成し、カラーテーブルを流し込む
-            # img_data のバッファを QImage に渡し、変換直後に確実に ARGB32 に変換してコピーを作成する
-            q_img = QImage(img_data.data, width, height, width, QImage.Format.Format_Indexed8)
+            # !!重要!! .tobytes() で新しいメモリ領域としてバイト列を抽出
+            rgb_bytes = rgb_data.tobytes()
             
-            color_table = []
-            for rgb in palette:
-                color_table.append(QColor(rgb[0], rgb[1], rgb[2]).rgba())
+            # !!重要!! コンストラクタで渡した直後に .copy() してQt側に所有権を完全に移す
+            q_img = QImage(rgb_bytes, width, height, width * 3, QImage.Format.Format_RGB888).copy()
             
-            while len(color_table) < 256:
-                color_table.append(QColor(0, 0, 0).rgba())
-            if len(color_table) > 256:
-                color_table = color_table[:256]
-                
-            q_img.setColorTable(color_table)
+            return q_img.convertToFormat(QImage.Format.Format_ARGB32)
             
-            # 最終的にARGBに変換して返す (変換後のイメージをコピーすることでメモリの所有権を確実にする)
-            return q_img.convertToFormat(QImage.Format.Format_ARGB32).copy()
         except Exception as e:
-            print(f"Error loading colored PGM: {e}")
-            import traceback
-            traceback.print_exc()
+            print(f"CRITICAL ERROR in load_colored_pgm: {e}")
             return None
 
     def load_image(self, img_array, width, height, file_path=""):
@@ -728,8 +698,9 @@ class ImageViewer(QWidget):
         # img_arrayがNoneの場合はfile_pathから読み込む（カラーPGM等の場合）
         if img_array is not None:
             bytes_per_line = width
-            q_img = QImage(img_array.data, width, height, bytes_per_line,
-                        QImage.Format.Format_Grayscale8)
+            # メモリ共有を避けるため tobytes() で新しいバイト列を作成し、さらに .copy() で完全に独立させる
+            q_img = QImage(img_array.tobytes(), width, height, bytes_per_line,
+                        QImage.Format.Format_Grayscale8).copy()
         elif file_path:
             # カラーPGMチェック (PGM + JSON)
             base_path, ext = os.path.splitext(file_path)
@@ -851,6 +822,22 @@ class ImageViewer(QWidget):
         self.waypoint_added.emit(waypoint)
 
     def update_display(self):
+        """描画更新（デバウンス処理付き）"""
+        if not self.pgm_layers:
+            return
+        
+        # 頻繁な再描画を抑えるためのデバウンス処理
+        if not hasattr(self, '_update_timer'):
+            self._update_timer = QTimer(self)
+            self._update_timer.setSingleShot(True)
+            self._update_timer.timeout.connect(self._do_update_display)
+        
+        # 16ms (約60FPS) のディレイを入れて連続呼び出しを抑制
+        if not self._update_timer.isActive():
+            self._update_timer.start(16)
+
+    def _do_update_display(self):
+        """実際の描画処理"""
         if not self.pgm_layers:
             return
             
@@ -896,7 +883,19 @@ class ImageViewer(QWidget):
                 draw_x = dx_pix
                 draw_y = canvas_size.height() - dy_pix - target_h
                 
-                painter.drawPixmap(QRect(int(draw_x), int(draw_y), int(target_w), int(target_h)), layer.pixmap)
+                # 回転が指定されている場合は QPainter のアフィン変換を使用
+                if abs(layer.rotation) > 0.001:
+                    painter.save()
+                    # 回転の中心を画像の中央に設定（調整のしやすさを優先）
+                    center_x = draw_x + target_w / 2
+                    center_y = draw_y + target_h / 2
+                    painter.translate(center_x, center_y)
+                    painter.rotate(layer.rotation)
+                    painter.translate(-center_x, -center_y)
+                    painter.drawPixmap(QRect(int(draw_x), int(draw_y), int(target_w), int(target_h)), layer.pixmap)
+                    painter.restore()
+                else:
+                    painter.drawPixmap(QRect(int(draw_x), int(draw_y), int(target_w), int(target_h)), layer.pixmap)
 
             if self.show_grid:
                 painter.setOpacity(0.3)

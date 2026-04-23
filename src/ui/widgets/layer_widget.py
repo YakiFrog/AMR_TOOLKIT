@@ -19,6 +19,7 @@ class Layer(QObject):
         self.origin_m = (0.0, 0.0)  # YAML由来の原点(m)
         self.file_path = ""
         self.is_map = False
+        self.rotation = 0.0  # 角度（度単位）
 
     def set_visible(self, visible):
         if (self.visible != visible):
@@ -129,7 +130,23 @@ class LayerControl(QWidget):
             self.off_y_spin.valueChanged.connect(self._on_off_y_changed)
             group_layout.addWidget(self.off_y_spin)
             
+            rot_label = QLabel("Rot (deg):")
+            rot_label.setToolTip("Rotation in degrees")
+            group_layout.addWidget(rot_label)
+            
+            self.rot_spin = QDoubleSpinBox()
+            self.rot_spin.setRange(-360, 360)
+            self.rot_spin.setSingleStep(0.5)
+            self.rot_spin.setDecimals(1)
+            self.rot_spin.setValue(self.layer.rotation)
+            self.rot_spin.valueChanged.connect(self._on_rot_changed)
+            group_layout.addWidget(self.rot_spin)
+            
             layout.addWidget(self.offset_group)
+
+    def _on_rot_changed(self, value):
+        self.layer.rotation = value
+        self.layer.changed.emit()
 
     def _on_off_x_changed(self, value):
         self.layer.offset_x = value
