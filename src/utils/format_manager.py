@@ -9,6 +9,7 @@ WAYPOINT_FORMAT = {
         'y': 'float',         # Y座標 (メートル) 
         'angle_radians': 'float',  # 角度 (ラジアン)
         'stop': 'bool',        # 停止フラグ
+        'wait_time': 'float',  # 待機時間 (秒)
         'change_map': 'string'  # マップ変更フラグ
     }
 }

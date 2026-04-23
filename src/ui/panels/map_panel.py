@@ -654,14 +654,14 @@ class ImageViewer(QWidget):
             super().mouseReleaseEvent(event)
 
     def load_colored_pgm(self, pgm_path, json_path):
-        """`.colored.json` のパレットを使用して PGM をカラー画像として読み込む (完全コピーによる安定版)"""
+        """`.colored.json` のパレットを使用して PGM をカラー画像として読み込む (完全メモリ分離版)"""
         try:
             with open(json_path, 'r') as f:
                 palette_data = json.load(f)
             palette = palette_data.get('palette', [])
             if not palette: return None
             
-            # PGM (P5) のヘッダーを手動で解析
+            # PGM (P5) のヘッダーを解析
             with open(pgm_path, 'rb') as f:
                 header = f.readline().strip()
                 if header != b'P5': return None
@@ -673,34 +673,40 @@ class ImageViewer(QWidget):
                 max_val = int(f.readline().strip())
                 raw_data = f.read()
 
-            # NumPyで高速にインデックスからRGBへ変換
+            # NumPyでインデックスからRGBへ変換
             img_data = np.frombuffer(raw_data, dtype=np.uint8).reshape((height, width))
             palette_np = np.array(palette, dtype=np.uint8)
-            
-            # インデックスの範囲外を丸める（安全策）
             img_data = np.clip(img_data, 0, len(palette_np) - 1)
             rgb_data = palette_np[img_data]
             
-            # !!重要!! .tobytes() で新しいメモリ領域としてバイト列を抽出
-            rgb_bytes = rgb_data.tobytes()
+            # --- 究極の安全策：ポインタ共有を一切せず、データのコピーのみでQImageを作成 ---
+            # 1. 独立したQImageを作成
+            q_img = QImage(width, height, QImage.Format.Format_RGB888)
             
-            # !!重要!! コンストラクタで渡した直後に .copy() してQt側に所有権を完全に移す
-            q_img = QImage(rgb_bytes, width, height, width * 3, QImage.Format.Format_RGB888).copy()
+            # 2. QImage内部のバッファに直接書き込む(コピーが発生する)
+            # memoryviewを使用して確実にバイトデータを書き込む
+            ptr = q_img.bits()
+            view = memoryview(ptr)
+            data_to_copy = rgb_data.tobytes()
+            view[:len(data_to_copy)] = data_to_copy
             
-            return q_img.convertToFormat(QImage.Format.Format_ARGB32)
+            # 3. 再コピーして所有権を完全にQt側に固める
+            return q_img.convertToFormat(QImage.Format.Format_ARGB32).copy()
             
         except Exception as e:
-            print(f"CRITICAL ERROR in load_colored_pgm: {e}")
+            print(f"ULTIMATE ERROR in load_colored_pgm: {e}")
             return None
 
     def load_image(self, img_array, width, height, file_path=""):
         """画像データをレイヤーとして追加"""
         # img_arrayがNoneの場合はfile_pathから読み込む（カラーPGM等の場合）
         if img_array is not None:
-            bytes_per_line = width
-            # メモリ共有を避けるため tobytes() で新しいバイト列を作成し、さらに .copy() で完全に独立させる
-            q_img = QImage(img_array.tobytes(), width, height, bytes_per_line,
-                        QImage.Format.Format_Grayscale8).copy()
+            # 究極の安全策：独立したメモリ領域を確保して手動コピー
+            q_img = QImage(width, height, QImage.Format.Format_Grayscale8)
+            view = memoryview(q_img.bits())
+            data_str = img_array.tobytes()
+            view[:len(data_str)] = data_str
+            q_img = q_img.copy()
         elif file_path:
             # カラーPGMチェック (PGM + JSON)
             base_path, ext = os.path.splitext(file_path)
