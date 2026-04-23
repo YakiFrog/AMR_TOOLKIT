@@ -36,7 +36,7 @@ class MenuPanel(QWidget):
         # 戻る/進むボタンの追加
         # button_layout = QHBoxLayout()
         
-        self.undo_button = QPushButton("↩ Undo")
+        self.undo_button = QPushButton("Undo")
         self.undo_button.setEnabled(False)  # 初期状態は無効
         self.undo_button.clicked.connect(self.undo_requested.emit)
         self.undo_button.setStyleSheet("""
@@ -104,7 +104,8 @@ class MenuPanel(QWidget):
 
         # ファイル選択部分のレイアウト
         file_layout = QHBoxLayout()
-        self.select_button = QPushButton("Select PGM File")
+        self.select_button = QPushButton("Add Map (PGM)")
+        self.select_button.setToolTip("PGM地図をレイヤーとして追加します。最初の地図が基準原点となります。")
         self.select_button.clicked.connect(self.open_file_dialog)
         
         # YAMLファイル選択ボタンを追加

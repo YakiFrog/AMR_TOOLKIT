@@ -1,7 +1,7 @@
-from PySide6.QtWidgets import QWidget, QHBoxLayout, QCheckBox, QSlider
-from PySide6.QtCore import Signal, Qt
+from PySide6.QtWidgets import QWidget, QHBoxLayout, QCheckBox, QSlider, QDoubleSpinBox, QLabel
+from PySide6.QtCore import Signal, Qt, QObject
 
-class Layer(QWidget):  
+class Layer(QObject):  
     """レイヤークラス"""
     changed = Signal()  # レイヤーの状態変更通知用シグナル
     
@@ -11,6 +11,14 @@ class Layer(QWidget):
         self.visible = visible
         self.pixmap = None
         self.opacity = 1.0
+        
+        # マップレイヤー用拡張
+        self.offset_x = 0.0  # メートル単位
+        self.offset_y = 0.0  # メートル単位
+        self.resolution = 0.05
+        self.origin_m = (0.0, 0.0)  # YAML由来の原点(m)
+        self.file_path = ""
+        self.is_map = False
 
     def set_visible(self, visible):
         if (self.visible != visible):
@@ -88,6 +96,48 @@ class LayerControl(QWidget):
         # レイアウトに追加
         layout.addWidget(self.visibility_cb)
         layout.addWidget(self.opacity_slider, stretch=1)  # スライダーを伸縮可能に設定
+
+        # オフセット設定（マップレイヤーの場合のみ）
+        if self.layer.is_map:
+            self.offset_group = QWidget()
+            group_layout = QHBoxLayout(self.offset_group)
+            group_layout.setContentsMargins(0, 0, 0, 0)
+            
+            off_x_label = QLabel("Shift X (m):")
+            off_x_label.setToolTip("Horizontal displacement in meters")
+            group_layout.addWidget(off_x_label)
+            
+            self.off_x_spin = QDoubleSpinBox()
+            self.off_x_spin.setRange(-1000, 1000)
+            self.off_x_spin.setSingleStep(0.1)  # 10cm step for intuitive control
+            self.off_x_spin.setDecimals(3)
+            self.off_x_spin.setValue(self.layer.offset_x)
+            self.off_x_spin.setToolTip("Fine-tune the map's X position")
+            self.off_x_spin.valueChanged.connect(self._on_off_x_changed)
+            group_layout.addWidget(self.off_x_spin)
+            
+            off_y_label = QLabel("Shift Y (m):")
+            off_y_label.setToolTip("Vertical displacement in meters")
+            group_layout.addWidget(off_y_label)
+            
+            self.off_y_spin = QDoubleSpinBox()
+            self.off_y_spin.setRange(-1000, 1000)
+            self.off_y_spin.setSingleStep(0.1)
+            self.off_y_spin.setDecimals(3)
+            self.off_y_spin.setValue(self.layer.offset_y)
+            self.off_y_spin.setToolTip("Fine-tune the map's Y position")
+            self.off_y_spin.valueChanged.connect(self._on_off_y_changed)
+            group_layout.addWidget(self.off_y_spin)
+            
+            layout.addWidget(self.offset_group)
+
+    def _on_off_x_changed(self, value):
+        self.layer.offset_x = value
+        self.layer.changed.emit()
+
+    def _on_off_y_changed(self, value):
+        self.layer.offset_y = value
+        self.layer.changed.emit()
 
     def _on_visibility_changed(self, state):
         """表示/非表示の切り替え"""

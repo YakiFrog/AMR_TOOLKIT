@@ -81,38 +81,36 @@ class MainWindow(QMainWindow):
         self.image_viewer.waypoint_edited.connect(self.right_panel.add_waypoint_to_list)
         self.right_panel.export_requested.connect(self.handle_export)
         self.right_panel.waypoint_import_requested.connect(self.import_waypoints_yaml)
+        self.right_panel.layer_add_requested.connect(self.handle_layer_add_requested)
 
     def update_layer_panel(self):
         """レイヤーパネルの表示を更新"""
         if hasattr(self, 'right_panel') and hasattr(self, 'image_viewer'):
-            self.right_panel.update_layer_list(self.image_viewer.layers)
+            self.right_panel.update_layer_list(self.image_viewer.all_layers)
 
     def load_pgm_file(self, file_path):
-        """PGMファイルを読み込む"""
+        """PGMファイルを読み込む (ImageViewerのマルチレイヤー機能を利用)"""
         try:
-            with open(file_path, 'rb') as f:
-                magic = f.readline().decode('ascii').strip()
-                if (magic != 'P5'):
-                    raise ValueError('Not a P5 PGM file')
-
-                while True:
-                    line = f.readline().decode('ascii').strip()
-                    if not line.startswith('#'):
-                        break
-                width, height = map(int, line.split())
-                max_val = int(f.readline().decode('ascii').strip())
-                
-                data = f.read()
-                img_array = np.frombuffer(data, dtype=np.uint8)
-                img_array = img_array.reshape((height, width))
-                
-                self.image_viewer.load_image(img_array, width, height)
-                print(f"Successfully loaded image: {width}x{height}, max value: {255}")
-
+            # ImageViewer側でパレット読み込みやレイヤー追加を一括処理
+            self.image_viewer.load_image(None, 0, 0, file_path=file_path)
+            self.menu_panel.file_name_label.setText(os.path.basename(file_path))
+            print(f"Requested image load: {file_path}")
         except Exception as e:
-            print(f"Error loading PGM file: {str(e)}")
-            import traceback
-            traceback.print_exc()
+            print(f"Error requesting PGM load: {str(e)}")
+
+    def handle_layer_add_requested(self):
+        """右パネルの「＋」ボタンから新規レイヤーを追加"""
+        file_name, _ = QFileDialog.getOpenFileName(
+            self,
+            "Add Map Layer",
+            "",
+            "Map Files (*.pgm *.yaml *.png);;All Files (*)"
+        )
+        if file_name:
+            if file_name.endswith('.yaml'):
+                self.load_yaml_file(file_name)
+            else:
+                self.load_pgm_file(file_name)
 
     def handle_zoom_value_changed(self, value):
         """ズームスライダーの値変更を処理"""
@@ -177,8 +175,10 @@ class MainWindow(QMainWindow):
                     'free_thresh': 0.25
                 }
                 if self.image_viewer.origin_point:
-                    origin_x = -self.image_viewer.origin_point[0] * self.image_viewer.resolution
-                    origin_y = -(self.image_viewer.pgm_layer.pixmap.height() - self.image_viewer.origin_point[1]) * self.image_viewer.resolution
+                    origin_x = -self.image_viewer.origin_point[0] * self.image_viewer.global_resolution
+                    # 最初のマップレイヤーを基準にする
+                    h = self.image_viewer.pgm_layers[0].pixmap.height() if self.image_viewer.pgm_layers else 0
+                    origin_y = -(h - self.image_viewer.origin_point[1]) * self.image_viewer.global_resolution
                     yaml_data['origin'] = [origin_x, origin_y, 0]
                 try:
                     with open(yaml_file_name, 'w') as f:

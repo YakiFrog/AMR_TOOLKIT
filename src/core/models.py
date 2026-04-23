@@ -42,18 +42,15 @@ class Waypoint:
 
     def update_metric_coordinates(self, origin_x, origin_y, resolution):
         """ピクセル座標からメートル座標を計算"""
-        # 原点情報を保存
+        # 原点情報を保存 (ピクセル単位の相対位置計算用)
         self._origin_x = origin_x
         self._origin_y = origin_y
         self.resolution = resolution
         
-        # 原点からの相対位置をピクセルで計算
-        rel_x = (self.pixel_x - origin_x) / 20
-        rel_y = (-self.pixel_y + origin_y) / 20 # Y軸を反転
-
-        # メートル単位に変換
-        self.x = rel_x 
-        self.y = rel_y
+        # 原点からの相対位置をメートル単位に変換
+        # 画像座標系(左上原点)から ROS座標系(原点基準、Y上、X右)への変換
+        self.x = (self.pixel_x - origin_x) * self.resolution
+        self.y = (origin_y - self.pixel_y) * self.resolution # Y軸を反転
         self.update_display_name()
 
     def renumber(self, new_number):

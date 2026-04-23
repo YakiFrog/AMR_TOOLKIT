@@ -15,6 +15,7 @@ class RightPanel(QWidget):
     generate_path_requested = Signal()  # パス生成用シグナル
     export_requested = Signal(bool, bool)  # (export_pgm, export_waypoints)
     waypoint_import_requested = Signal(str)  # YAMLファイルパスを送信
+    layer_add_requested = Signal()  # レイヤー追加要求用
     
     def __init__(self):
         super().__init__()
@@ -55,6 +56,8 @@ class RightPanel(QWidget):
         widget = QWidget()
         layout = QVBoxLayout(widget)
         
+        # ヘッダー (タイトル + 追加ボタン)
+        header_layout = QHBoxLayout()
         title_label = QLabel("Layers")
         title_label.setStyleSheet("""
             QLabel {
@@ -68,6 +71,27 @@ class RightPanel(QWidget):
                 border-top-right-radius: 6px;
             }
         """)
+        
+        add_button = QPushButton("+")
+        add_button.setToolTip("Add Map Layer (.pgm / .yaml)")
+        add_button.setFixedSize(24, 24)
+        add_button.setStyleSheet("""
+            QPushButton {
+                background-color: #3b82f6;
+                color: white;
+                border-radius: 12px;
+                font-weight: bold;
+                font-size: 16px;
+                border: none;
+            }
+            QPushButton:hover {
+                background-color: #2563eb;
+            }
+        """)
+        add_button.clicked.connect(self.layer_add_requested.emit)
+        
+        header_layout.addWidget(title_label, stretch=1)
+        header_layout.addWidget(add_button)
         
         # スクロールエリアを追加
         scroll_area = QScrollArea()
@@ -100,7 +124,7 @@ class RightPanel(QWidget):
         scroll_area.setMinimumHeight(150)
         scroll_area.setMaximumHeight(200)
         
-        layout.addWidget(title_label)
+        layout.addLayout(header_layout)
         layout.addWidget(scroll_area)
         layout.setSpacing(5)
         
@@ -364,10 +388,6 @@ class RightPanel(QWidget):
             widget = self.waypoint_widgets.pop(number)
             self.waypoint_list_layout.removeWidget(widget)
             widget.deleteLater()
-            for widget in self.waypoint_widgets.values():
-                self.waypoint_list_layout.removeWidget(widget)
-                widget.deleteLater()
-            self.waypoint_widgets.clear()
 
     def clear_waypoint_list(self):
         while self.waypoint_list_layout.count():

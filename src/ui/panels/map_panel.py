@@ -1,5 +1,7 @@
 import numpy as np
 import yaml
+import json
+import os
 from PySide6.QtWidgets import (QWidget, QVBoxLayout, QHBoxLayout, QScrollArea, 
                                QLabel, QPushButton, QSlider, QToolTip)
 from PySide6.QtCore import Qt, QPoint, Signal, QEvent, QSize, QTimer, QRect
@@ -150,10 +152,12 @@ class DrawableLabel(QLabel):
             self.cursor_pixmap.fill(Qt.GlobalColor.transparent)
             
             painter = QPainter(self.cursor_pixmap)
-            painter.setPen(QPen(Qt.GlobalColor.black, 1))
-            painter.setBrush(Qt.BrushStyle.NoBrush)
-            painter.drawEllipse(0, 0, cursor_size-1, cursor_size-1)
-            painter.end()
+            try:
+                painter.setPen(QPen(Qt.GlobalColor.black, 1))
+                painter.setBrush(Qt.BrushStyle.NoBrush)
+                painter.drawEllipse(0, 0, cursor_size-1, cursor_size-1)
+            finally:
+                painter.end()
             
             cursor = QCursor(self.cursor_pixmap, cursor_size // 2, cursor_size // 2)
             self.setCursor(cursor)
@@ -220,7 +224,7 @@ class DrawableLabel(QLabel):
                     self.parent_viewer.update_display()
                     self.parent_viewer.waypoint_edited.emit(self.editing_waypoint)
         else:
-            super().mousePressEvent(event)
+            event.ignore()
 
     def mouseMoveEvent(self, event):
         """マウス移動時のイベント処理"""
@@ -286,7 +290,7 @@ class DrawableLabel(QLabel):
                 self.parent_viewer.update_display()
                 self.parent_viewer.waypoint_edited.emit(self.editing_waypoint)
         else:
-            super().mouseMoveEvent(event)
+            event.ignore()
 
     def mouseReleaseEvent(self, event):
         if self.drawing_enabled:
@@ -297,18 +301,20 @@ class DrawableLabel(QLabel):
                 if self.temp_waypoint:
                     final_angle = np.arctan2(dy, dx)
                     self.temp_waypoint.set_angle(final_angle)
-                    self.waypoint_updated.emit(self.temp_waypoint)
-                self.is_setting_angle = False
-                self.click_pos = None
-                self.temp_waypoint = None
+                    self.waypoint_completed.emit(current_pos)
+            self.is_setting_angle = False
+            self.temp_waypoint = None
+            self.click_pos = None
             self.last_pos = None
+            event.accept()
         elif self.edit_mode and self.editing_waypoint:
             self.is_editing_angle = False
             if self.parent_viewer:
                 self.parent_viewer.update_display()
                 self.parent_viewer.waypoint_edited.emit(self.editing_waypoint)
+            event.accept()
         else:
-            super().mouseReleaseEvent(event)
+            event.ignore()
 
     def contextMenuEvent(self, event):
         """右クリックメニューの表示"""
@@ -346,7 +352,7 @@ class ImageViewer(QWidget):
     """画像表示用ウィジェット
     PGM画像の表示とズーム機能を管理"""
     scale_changed = Signal(float)
-    layer_changed = Signal()
+    layer_changed = Signal()  # レイヤーの状態変更通知用シグナル
     waypoint_added = Signal(Waypoint)
     waypoint_removed = Signal(int)
     waypoint_edited = Signal(Waypoint)
@@ -386,16 +392,15 @@ class ImageViewer(QWidget):
         self.coord_label.setAlignment(Qt.AlignmentFlag.AlignCenter)
         self.coord_label.hide()
 
-        self.layers = []
-        self.active_layer = None
+        self.pgm_layers = [] # 複数の地図レイヤーを保持
         
-        self.pgm_layer = Layer("PGM Layer")
         self.drawing_layer = Layer("Drawing Layer")
+        self.path_layer = Layer("Path Layer")
         self.waypoint_layer = Layer("Waypoint Layer")
         self.origin_layer = Layer("Origin Layer")
-        self.path_layer = Layer("Path Layer")
+        
+        # UI表示用のレイヤーリスト（管理しやすくするため）
         self.layers = [
-            self.pgm_layer,
             self.drawing_layer,
             self.path_layer,
             self.waypoint_layer,
@@ -405,13 +410,17 @@ class ImageViewer(QWidget):
         
         for layer in self.layers:
             layer.changed.connect(self.on_layer_changed)
-        
+
         self.waypoints = []
         self.waypoint_size = 15
         self.show_grid = False
         self.grid_size = 50
-        self.origin_point = None
         self.resolution = 0.05
+        
+        # グローバル（基準）原点情報
+        self.global_origin = None  # (m_x, m_y)
+        self.global_resolution = 0.05
+        self.origin_point = None   # ピクセル座標での(0,0)m位置
 
         self.setup_display()
         self.setup_scroll_area()
@@ -429,6 +438,11 @@ class ImageViewer(QWidget):
         self._update_pending = False
         self._cached_result = None
         self._cache_valid = False
+
+    @property
+    def all_layers(self):
+        """全てのレイヤー（地図レイヤー + 特殊レイヤー）を返す"""
+        return self.pgm_layers + self.layers
 
     def setup_display(self):
         self.pgm_display = DrawableLabel()
@@ -585,8 +599,8 @@ class ImageViewer(QWidget):
         scaled_start = start_img
         scaled_end = end_img
 
-        if self.pgm_display.pixmap() and self.pgm_layer.pixmap:
-            orig_w = self.pgm_layer.pixmap.width()
+        if self.pgm_display.pixmap() and self.pgm_layers:
+            orig_w = self.pgm_layers[0].pixmap.width()
             disp_w = self.pgm_display.pixmap().width()
             scale_factor = orig_w / disp_w if disp_w else 1.0
         else:
@@ -595,13 +609,15 @@ class ImageViewer(QWidget):
         scaled_eraser_size = max(1, int(self.eraser_size * scale_factor))
 
         painter = QPainter(self.drawing_layer.pixmap)
-        if self.drawing_mode == DrawingMode.PEN:
-            painter.setPen(QPen(self.pen_color, scaled_pen_size, Qt.PenStyle.SolidLine, Qt.PenCapStyle.RoundCap, Qt.PenJoinStyle.RoundJoin))
-        else:
-            painter.setPen(QPen(Qt.GlobalColor.white, scaled_eraser_size, Qt.PenStyle.SolidLine, Qt.PenCapStyle.RoundCap, Qt.PenJoinStyle.RoundJoin))
+        try:
+            if self.drawing_mode == DrawingMode.PEN:
+                painter.setPen(QPen(self.pen_color, scaled_pen_size, Qt.PenStyle.SolidLine, Qt.PenCapStyle.RoundCap, Qt.PenJoinStyle.RoundJoin))
+            else:
+                painter.setPen(QPen(Qt.GlobalColor.white, scaled_eraser_size, Qt.PenStyle.SolidLine, Qt.PenCapStyle.RoundCap, Qt.PenJoinStyle.RoundJoin))
 
-        painter.drawLine(scaled_start, scaled_end)
-        painter.end()
+            painter.drawLine(scaled_start, scaled_end)
+        finally:
+            painter.end()
         self._cache_valid = False
         self.update_display()
 
@@ -637,15 +653,158 @@ class ImageViewer(QWidget):
         else:
             super().mouseReleaseEvent(event)
 
-    def load_image(self, img_array, width, height):
-        bytes_per_line = width
-        q_img = QImage(img_array.data, width, height, bytes_per_line,
-                    QImage.Format.Format_Grayscale8)
-        self.pgm_layer.pixmap = QPixmap.fromImage(q_img)
-        self.drawing_layer.pixmap = QPixmap(self.pgm_layer.pixmap.size())
-        self.drawing_layer.pixmap.fill(Qt.GlobalColor.transparent)
+    def load_colored_pgm(self, pgm_path, json_path):
+        """`.colored.json` のパレットを使用して PGM をカラー画像として読み込む"""
+        try:
+            with open(json_path, 'r') as f:
+                palette_data = json.load(f)
+            palette = palette_data.get('palette', [])
+            if not palette:
+                return None
+            
+            # PGM (P5) のヘッダーを手動で解析してインデックス画像として精度よく読み込む
+            with open(pgm_path, 'rb') as f:
+                # ヘッダー解析 (P5, Width, Height, MaxVal)
+                line1 = f.readline().strip()
+                if line1 != b'P5':
+                    return None
+                    
+                # コメントをスキップ
+                line = f.readline()
+                while line.startswith(b'#'):
+                    line = f.readline()
+                
+                dims = line.split()
+                if len(dims) < 2:
+                    # 次の行に高さがある可能性
+                    line = f.readline()
+                    dims += line.split()
+                
+                width = int(dims[0])
+                height = int(dims[1])
+                
+                max_val_line = f.readline().strip()
+                max_val = int(max_val_line)
+                
+                # データの読み出し
+                raw_data = f.read()
+                
+            # 8-bit PGMを想定
+            if max_val > 255:
+                # 16-bit PGMの場合は上位バイトのみ使用（簡易処理）
+                img_data = np.frombuffer(raw_data, dtype='>u2').astype(np.uint8)
+            else:
+                img_data = np.frombuffer(raw_data, dtype=np.uint8)
+            
+            # リサイズ
+            img_data = img_data.reshape((height, width))
+            
+            # QImage を作成
+            # インデックス画像として作成し、カラーテーブルを流し込む
+            # img_data のバッファを QImage に渡し、変換直後に確実に ARGB32 に変換してコピーを作成する
+            q_img = QImage(img_data.data, width, height, width, QImage.Format.Format_Indexed8)
+            
+            color_table = []
+            for rgb in palette:
+                color_table.append(QColor(rgb[0], rgb[1], rgb[2]).rgba())
+            
+            while len(color_table) < 256:
+                color_table.append(QColor(0, 0, 0).rgba())
+            if len(color_table) > 256:
+                color_table = color_table[:256]
+                
+            q_img.setColorTable(color_table)
+            
+            # 最終的にARGBに変換して返す (変換後のイメージをコピーすることでメモリの所有権を確実にする)
+            return q_img.convertToFormat(QImage.Format.Format_ARGB32).copy()
+        except Exception as e:
+            print(f"Error loading colored PGM: {e}")
+            import traceback
+            traceback.print_exc()
+            return None
+
+    def load_image(self, img_array, width, height, file_path=""):
+        """画像データをレイヤーとして追加"""
+        # img_arrayがNoneの場合はfile_pathから読み込む（カラーPGM等の場合）
+        if img_array is not None:
+            bytes_per_line = width
+            q_img = QImage(img_array.data, width, height, bytes_per_line,
+                        QImage.Format.Format_Grayscale8)
+        elif file_path:
+            # カラーPGMチェック (PGM + JSON)
+            base_path, ext = os.path.splitext(file_path)
+            json_path = base_path + ".json"
+            yaml_path = base_path + ".yaml"
+            yml_path = base_path + ".yml"
+            
+            if ext.lower() == ".pgm" and os.path.exists(json_path):
+                q_img = self.load_colored_pgm(file_path, json_path)
+            else:
+                q_img = QImage(file_path)
+        else:
+            return
+
+        if q_img is None or q_img.isNull():
+            return
+
+        layer_name = os.path.basename(file_path) if file_path else f"Map {len(self.pgm_layers)+1}"
+        new_layer = Layer(layer_name)
+        new_layer.is_map = True
+        new_layer.file_path = file_path
+        new_layer.pixmap = QPixmap.fromImage(q_img)
+        
+        # 最初の地図ならグローバル設定を初期化
+        if not self.pgm_layers:
+            self.pgm_layers.append(new_layer)
+            
+            # メタデータがない場合に備えて、最初の画像情報を暫定的なグローバル基準とする
+            if self.global_origin is None:
+                self.global_origin = (0.0, 0.0)
+            if self.global_resolution == 0.05:
+                self.global_resolution = new_layer.resolution
+                self.resolution = self.global_resolution
+                
+            # 原点(0,0)mのピクセル位置を計算（未設定なら左下を0,0mとする）
+            if self.origin_point is None:
+                x_pixel = int(-self.global_origin[0] / self.global_resolution)
+                y_pixel = int(-self.global_origin[1] / self.global_resolution)
+                if new_layer.pixmap:
+                    y_pixel = new_layer.pixmap.height() - y_pixel
+                self.origin_point = (x_pixel, y_pixel)
+                self.draw_origin_point()
+
+            # 描画用レイヤーのサイズを合わせる
+            if not self.drawing_layer.pixmap:
+                self.drawing_layer.pixmap = QPixmap(new_layer.pixmap.size())
+                self.drawing_layer.pixmap.fill(Qt.GlobalColor.transparent)
+        else:
+            self.pgm_layers.append(new_layer)
+        
+        # シグナル接続
+        new_layer.changed.connect(self.on_layer_changed)
+        
+        # 画像読み込み後、対応するYAMLメタデータがあれば自動ロード（fuzzy match対応）
+        if file_path:
+            base_path = os.path.splitext(file_path)[0]
+            yaml_candidates = [base_path + ".yaml", base_path + ".yml"]
+            # .colored や .color などの接尾辞を除去したベース名でも探す
+            clean_base = base_path
+            for suffix in [".colored", ".color"]:
+                if clean_base.endswith(suffix):
+                    clean_base = clean_base[:-len(suffix)]
+                    yaml_candidates.append(clean_base + ".yaml")
+                    yaml_candidates.append(clean_base + ".yml")
+                    break
+            
+            for ypath in yaml_candidates:
+                if os.path.exists(ypath):
+                    self.load_yaml_file(ypath)
+                    break
+        
         self.update_display()
         self.coord_label.show()
+        # レイヤーリストの更新を通知
+        self.layer_changed.emit()
 
     def zoom_in(self):
         self.handle_scale_change(1.2)
@@ -660,7 +819,7 @@ class ImageViewer(QWidget):
 
     def handle_scale_change(self, factor):
         new_scale = self.scale_factor * factor
-        if MIN_SCALE <= new_scale <= MAX_SCALE:
+        if 0.02 <= new_scale <= 2.0:
             self.scale_factor = new_scale
             self.update_display()
             self.scale_changed.emit(self.scale_factor)
@@ -668,7 +827,7 @@ class ImageViewer(QWidget):
                 self.pgm_display.updateCursor()
 
     def add_waypoint(self, pos):
-        if not self.pgm_layer.pixmap:
+        if not self.pgm_layers or not self.pgm_layers[0].pixmap:
             return
         im_pos = self.display_to_image_coords(pos)
         if im_pos is None:
@@ -681,7 +840,7 @@ class ImageViewer(QWidget):
         self.waypoints.append(waypoint)
         self.pgm_display.temp_waypoint = waypoint
         if not self.waypoint_layer.pixmap:
-            self.waypoint_layer.pixmap = QPixmap(self.pgm_layer.pixmap.size())
+            self.waypoint_layer.pixmap = QPixmap(self.pgm_layers[0].pixmap.size())
             self.waypoint_layer.pixmap.fill(Qt.GlobalColor.transparent)
         self.waypoint_added.emit(waypoint)
         self.update_display()
@@ -692,87 +851,126 @@ class ImageViewer(QWidget):
         self.waypoint_added.emit(waypoint)
 
     def update_display(self):
-        if not self.pgm_layer.pixmap:
+        if not self.pgm_layers:
             return
-        result = QPixmap(self.pgm_layer.pixmap.size())
+            
+        # 基準となるレイヤー（最初の地図）のサイズをキャンバスサイズとする
+        base_pm = self.pgm_layers[0].pixmap
+        canvas_size = base_pm.size()
+        
+        result = QPixmap(canvas_size)
         result.fill(Qt.GlobalColor.white)
         painter = QPainter(result)
-        if (self.pgm_layer.visible and self.pgm_layer.pixmap):
-            painter.setOpacity(self.pgm_layer.opacity)
-            painter.drawPixmap(0, 0, self.pgm_layer.pixmap)
-        if self.show_grid:
-            painter.setOpacity(0.3)
-            pen = QPen(Qt.GlobalColor.gray)
-            pen.setStyle(Qt.PenStyle.DashLine)
-            painter.setPen(pen)
-            for x in range(0, result.width(), self.grid_size):
-                painter.drawLine(x, 0, x, result.height())
-            for y in range(0, result.height(), self.grid_size):
-                painter.drawLine(0, y, result.width(), y)
-        if self.drawing_layer.visible and self.drawing_layer.pixmap:
-            painter.setOpacity(self.drawing_layer.opacity)
-            painter.drawPixmap(0, 0, self.drawing_layer.pixmap)
-        if self.path_layer.visible and self.path_layer.pixmap:
-            painter.setOpacity(self.path_layer.opacity)
-            painter.drawPixmap(0, 0, self.path_layer.pixmap)
-        if self.waypoints and self.waypoint_layer.visible:
-            painter.setOpacity(self.waypoint_layer.opacity)
-            painter.setRenderHint(QPainter.RenderHint.Antialiasing)
-            for waypoint in self.waypoints:
-                x, y = waypoint.pixel_x, waypoint.pixel_y
-                base_size = WAYPOINT_SETTINGS['BASE_SIZE']
-                is_editing = (self.pgm_display.edit_mode and self.pgm_display.editing_waypoint and self.pgm_display.editing_waypoint.number == waypoint.number)
-                color = QColor(0, 120, 255, 255) if is_editing else QColor(255, 0, 0, 255)
-                size_multiplier = WAYPOINT_SETTINGS['EDIT_SIZE_MULT'] if is_editing else 1.0
-                pen = QPen(color)
-                pen.setWidth(3)
+        try:
+            painter.setRenderHint(QPainter.RenderHint.SmoothPixmapTransform)
+
+            # 地図レイヤーの描画
+            for layer in self.pgm_layers:
+                if not layer.visible or not layer.pixmap:
+                    continue
+                    
+                painter.setOpacity(layer.opacity)
+                
+                # 座標変換とスケーリングの計算
+                # 1. 解像度の違いによるスケーリング
+                scale_ratio = layer.resolution / self.global_resolution
+                
+                # 2. 原点ズレによるピクセルオフセットの計算 (メートル単位 -> ピクセル単位)
+                # global_origin が未設定でも、(0,0) を基準としてオフセット計算を行う
+                g_origin = self.global_origin if self.global_origin else (0.0, 0.0)
+                
+                # ROS origin は左下隅の座標(m)。
+                # dx = (layer_origin_x - global_origin_x) / resolution
+                dx_m = (layer.origin_m[0] - g_origin[0]) + layer.offset_x
+                dy_m = (layer.origin_m[1] - g_origin[1]) + layer.offset_y
+                
+                dx_pix = dx_m / self.global_resolution
+                dy_pix = dy_m / self.global_resolution
+                
+                # 画像の描画位置（左上基準への変換）
+                # ROSは Y軸上が正。画像は Y軸下が正。
+                target_w = layer.pixmap.width() * scale_ratio
+                target_h = layer.pixmap.height() * scale_ratio
+                
+                # 基準地図の左下を原点とした時の、現在地形の描画開始点(左上)
+                draw_x = dx_pix
+                draw_y = canvas_size.height() - dy_pix - target_h
+                
+                painter.drawPixmap(QRect(int(draw_x), int(draw_y), int(target_w), int(target_h)), layer.pixmap)
+
+            if self.show_grid:
+                painter.setOpacity(0.3)
+                pen = QPen(Qt.GlobalColor.gray)
+                pen.setStyle(Qt.PenStyle.DashLine)
                 painter.setPen(pen)
-                adjusted_size = base_size * size_multiplier
-                angle_line_length = adjusted_size * WAYPOINT_SETTINGS['ARROW_LENGTH_MULT']
-                end_x = x + int(angle_line_length * np.cos(waypoint.angle))
-                end_y = y - int(angle_line_length * np.sin(waypoint.angle))
-                painter.drawLine(x, y, end_x, end_y)
-                arrow_size = adjusted_size * WAYPOINT_SETTINGS['ARROW_WIDTH_MULT']
-                arrow_angle1 = waypoint.angle + np.pi * 3/4
-                arrow_angle2 = waypoint.angle - np.pi * 3/4
-                arrow_x1 = end_x + int(arrow_size * np.cos(arrow_angle1))
-                arrow_y1 = end_y - int(arrow_size * np.sin(arrow_angle1))
-                arrow_x2 = end_x + int(arrow_size * np.cos(arrow_angle2))
-                arrow_y2 = end_y - int(arrow_size * np.sin(arrow_angle2))
-                painter.drawLine(end_x, end_y, arrow_x1, arrow_y1)
-                painter.drawLine(end_x, end_y, arrow_x2, arrow_y2)
-                painter.setPen(Qt.PenStyle.NoPen)
-                painter.setBrush(color)
-                painter.drawEllipse(x - adjusted_size, y - adjusted_size, adjusted_size * 2, adjusted_size * 2)
-                painter.setPen(QColor(255, 255, 255, 230))
-                font = self.font()
-                font.setPointSize(WAYPOINT_SETTINGS['FONT_SIZE_MAIN_MULT'] * WAYPOINT_SETTINGS['BASE_SIZE'])
-                font.setBold(True)
-                painter.setFont(font)
-                number_text = str(waypoint.number)
-                font_metrics = painter.fontMetrics()
-                text_width = font_metrics.horizontalAdvance(number_text)
-                text_height = font_metrics.height()
-                text_x = x - text_width // 2
-                text_y = y + text_height // 3
-                painter.drawText(text_x, text_y, number_text)
-                num_attributes = len(waypoint.attributes)
-                if (num_attributes > 0):
-                    painter.setPen(QColor(255, 255, 255))
-                    font.setPointSize(WAYPOINT_SETTINGS['FONT_SIZE_ATTR_MULT'] * WAYPOINT_SETTINGS['BASE_SIZE'])
+                for x in range(0, result.width(), self.grid_size):
+                    painter.drawLine(x, 0, x, result.height())
+                for y in range(0, result.height(), self.grid_size):
+                    painter.drawLine(0, y, result.width(), y)
+            
+            if self.drawing_layer.visible and self.drawing_layer.pixmap:
+                painter.setOpacity(self.drawing_layer.opacity)
+                painter.drawPixmap(0, 0, self.drawing_layer.pixmap)
+            if self.path_layer.visible and self.path_layer.pixmap:
+                painter.setOpacity(self.path_layer.opacity)
+                painter.drawPixmap(0, 0, self.path_layer.pixmap)
+            if self.waypoints and self.waypoint_layer.visible:
+                painter.setOpacity(self.waypoint_layer.opacity)
+                painter.setRenderHint(QPainter.RenderHint.Antialiasing)
+                for waypoint in self.waypoints:
+                    x, y = waypoint.pixel_x, waypoint.pixel_y
+                    base_size = WAYPOINT_SETTINGS['BASE_SIZE']
+                    is_editing = (self.pgm_display.edit_mode and self.pgm_display.editing_waypoint and self.pgm_display.editing_waypoint.number == waypoint.number)
+                    color = QColor(0, 120, 255, 255) if is_editing else QColor(255, 0, 0, 255)
+                    size_multiplier = WAYPOINT_SETTINGS['EDIT_SIZE_MULT'] if is_editing else 1.0
+                    pen = QPen(color)
+                    pen.setWidth(3)
+                    painter.setPen(pen)
+                    adjusted_size = base_size * size_multiplier
+                    angle_line_length = adjusted_size * WAYPOINT_SETTINGS['ARROW_LENGTH_MULT']
+                    end_x = x + int(angle_line_length * np.cos(waypoint.angle))
+                    end_y = y - int(angle_line_length * np.sin(waypoint.angle))
+                    painter.drawLine(x, y, end_x, end_y)
+                    arrow_size = adjusted_size * WAYPOINT_SETTINGS['ARROW_WIDTH_MULT']
+                    arrow_angle1 = waypoint.angle + np.pi * 3/4
+                    arrow_angle2 = waypoint.angle - np.pi * 3/4
+                    arrow_x1 = end_x + int(arrow_size * np.cos(arrow_angle1))
+                    arrow_y1 = end_y - int(arrow_size * np.sin(arrow_angle1))
+                    arrow_x2 = end_x + int(arrow_size * np.cos(arrow_angle2))
+                    arrow_y2 = end_y - int(arrow_size * np.sin(arrow_angle2))
+                    painter.drawLine(end_x, end_y, arrow_x1, arrow_y1)
+                    painter.drawLine(end_x, end_y, arrow_x2, arrow_y2)
+                    painter.setPen(Qt.PenStyle.NoPen)
+                    painter.setBrush(color)
+                    painter.drawEllipse(x - adjusted_size, y - adjusted_size, adjusted_size * 2, adjusted_size * 2)
+                    painter.setPen(QColor(255, 255, 255, 230))
+                    font = self.font()
+                    font.setPointSize(WAYPOINT_SETTINGS['FONT_SIZE_MAIN_MULT'] * WAYPOINT_SETTINGS['BASE_SIZE'])
                     font.setBold(True)
                     painter.setFont(font)
-                    attr_text = str(num_attributes)
-                    attr_x = x + adjusted_size - 5
-                    attr_y = y - adjusted_size + 5
-                    painter.setBrush(QColor(50, 50, 50, 200))
-                    painter.drawEllipse(attr_x - 8, attr_y - 12, 16, 16)
-                    painter.drawText(attr_x - 3, attr_y, attr_text)
-                waypoint.hover_rect = QRect(x - adjusted_size, y - adjusted_size, adjusted_size * 2, adjusted_size * 2)
-        if self.origin_layer.visible and self.origin_layer.pixmap:
-            painter.setOpacity(self.origin_layer.opacity)
-            painter.drawPixmap(0, 0, self.origin_layer.pixmap)
-        painter.end()
+                    number_text = str(waypoint.number)
+                    font_metrics = painter.fontMetrics()
+                    text_width = font_metrics.horizontalAdvance(number_text)
+                    text_height = font_metrics.height()
+                    text_x = x - text_width // 2
+                    text_y = y + text_height // 3
+                    painter.drawText(text_x, text_y, number_text)
+                    num_attributes = len(waypoint.attributes)
+                    if (num_attributes > 0):
+                        painter.setPen(QColor(255, 255, 255))
+                        font.setPointSize(WAYPOINT_SETTINGS['FONT_SIZE_ATTR_MULT'] * WAYPOINT_SETTINGS['BASE_SIZE'])
+                        font.setBold(True)
+                        painter.setFont(font)
+                        attr_text = str(num_attributes)
+                        attr_x = x + adjusted_size - 5
+                        attr_y = y - adjusted_size + 5
+                        painter.setBrush(QColor(50, 50, 50, 200))
+                        painter.drawEllipse(attr_x - 8, attr_y - 12, 16, 16)
+                        painter.drawText(attr_x - 3, attr_y, attr_text)
+                    waypoint.hover_rect = QRect(x - adjusted_size, y - adjusted_size, adjusted_size * 2, adjusted_size * 2)
+        finally:
+            painter.end()
+
         new_size = QSize(int(result.width() * self.scale_factor), int(result.height() * self.scale_factor))
         use_fast = (result.width() > 2000 or result.height() > 2000 or self._is_drawing_stroke or self.scale_factor < 0.5)
         transform_mode = (Qt.TransformationMode.FastTransformation if use_fast else Qt.TransformationMode.SmoothTransformation)
@@ -781,7 +979,7 @@ class ImageViewer(QWidget):
         self.pgm_display.adjustSize()
 
     def get_displayed_pixmap_info(self):
-        if not self.pgm_display or not self.pgm_display.pixmap() or not self.pgm_layer.pixmap: return None
+        if not self.pgm_display or not self.pgm_display.pixmap() or not self.pgm_layers: return None
         displayed_pm = self.pgm_display.pixmap()
         disp_w, disp_h = displayed_pm.width(), displayed_pm.height()
         label_w, label_h = self.pgm_display.width(), self.pgm_display.height()
@@ -794,7 +992,7 @@ class ImageViewer(QWidget):
         disp_w, disp_h, offset_x, offset_y, displayed_pm = info
         x_disp, y_disp = pos.x() - offset_x, pos.y() - offset_y
         if x_disp < 0 or y_disp < 0 or x_disp >= disp_w or y_disp >= disp_h: return None
-        orig_pm = self.pgm_layer.pixmap
+        orig_pm = self.pgm_layers[0].pixmap
         orig_w, orig_h = orig_pm.width(), orig_pm.height()
         img_x, img_y = int(x_disp * (orig_w / disp_w)), int(y_disp * (orig_h / disp_h))
         return QPoint(img_x, img_y)
@@ -803,7 +1001,7 @@ class ImageViewer(QWidget):
         info = self.get_displayed_pixmap_info()
         if not info: return None
         disp_w, disp_h, offset_x, offset_y, displayed_pm = info
-        orig_pm = self.pgm_layer.pixmap
+        orig_pm = self.pgm_layers[0].pixmap
         orig_w, orig_h = orig_pm.width(), orig_pm.height()
         x_disp, y_disp = int(image_pos.x() * (disp_w / orig_w)), int(image_pos.y() * (disp_h / orig_h))
         return QPoint(x_disp + offset_x, y_disp + offset_y)
@@ -850,77 +1048,110 @@ class ImageViewer(QWidget):
         self.update_display()
 
     def update_mouse_position(self, pos):
-        if not self.pgm_layer.pixmap or not self.origin_point: return
+        if not self.pgm_layers or not self.origin_point: return
         im_pos = self.display_to_image_coords(pos)
         if im_pos is None:
             self.coord_label.hide()
             return
         pixel_x, pixel_y = im_pos.x(), im_pos.y()
         origin_x, origin_y = self.origin_point
-        rel_x, rel_y = (pixel_x - origin_x) / 20, (origin_y - pixel_y) / 20
+        # メートル単位への変換
+        rel_x, rel_y = (pixel_x - origin_x) * self.global_resolution, (origin_y - pixel_y) * self.global_resolution
         self.coord_label.setText(f"Pixel: ({pixel_x}, {pixel_y})\nMetric: ({rel_x:.2f}, {rel_y:.2f})")
         self.coord_label.show()
 
     def load_yaml_file(self, file_path):
+        """YAMLファイルから原点と解像度を読み込む"""
         try:
-            with open(file_path, 'r') as f: yaml_data = yaml.safe_load(f)
+            with open(file_path, 'r') as f:
+                yaml_data = yaml.safe_load(f)
+            
             if 'origin' in yaml_data:
                 origin = yaml_data['origin']
-                if len(origin) >= 2:
-                    self.resolution = float(yaml_data.get('resolution', 0.05))
-                    x_pixel = int(-origin[0] / self.resolution)
-                    y_pixel = int(-origin[1] / self.resolution)
-                    if self.pgm_layer.pixmap:
-                        height = self.pgm_layer.pixmap.height()
-                        y_pixel = height - y_pixel
-                    self.origin_point = (x_pixel, y_pixel)
-                    self.draw_origin_point()
-                    self.update_all_waypoint_coordinates()
-        except Exception as e: print(f"Error loading YAML file: {str(e)}")
+                res = float(yaml_data.get('resolution', 0.05))
+                
+                # 対応するPGMレイヤーを探す
+                # YAMLと同名のPGMファイルがロードされているか確認
+                base_name = os.path.splitext(file_path)[0]
+                target_layer = None
+                for layer in self.pgm_layers:
+                    if layer.file_path and os.path.splitext(layer.file_path)[0] == base_name:
+                        target_layer = layer
+                        break
+                
+                # もし未ロードなら（後からYAMLだけ読み込まれた場合）、最新のマップレイヤーに適用
+                if not target_layer and self.pgm_layers:
+                    target_layer = self.pgm_layers[-1]
+                
+                if target_layer:
+                    target_layer.origin_m = (float(origin[0]), float(origin[1]))
+                    target_layer.resolution = res
+                    
+                    # 最初のマップならグローバル座標系として設定
+                    if target_layer == self.pgm_layers[0]:
+                        self.global_origin = target_layer.origin_m
+                        self.global_resolution = target_layer.resolution
+                        self.resolution = self.global_resolution
+                        # 原点(0,0)mのピクセル位置を計算
+                        x_pixel = int(-self.global_origin[0] / self.global_resolution)
+                        y_pixel = int(-self.global_origin[1] / self.global_resolution)
+                        # ROSは左下原点。画像は左上原点なので、Y軸を変換
+                        if target_layer.pixmap:
+                            y_pixel = target_layer.pixmap.height() - y_pixel
+                        self.origin_point = (x_pixel, y_pixel)
+                        self.draw_origin_point()
+                        self.update_all_waypoint_coordinates()
+                
+                self.update_display()
+        except Exception as e:
+            print(f"Error loading YAML file: {str(e)}")
 
     def update_all_waypoint_coordinates(self):
         if not self.origin_point: return
         origin_x, origin_y = self.origin_point
         for waypoint in self.waypoints:
-            waypoint.update_metric_coordinates(origin_x, origin_y, self.resolution)
+            waypoint.update_metric_coordinates(origin_x, origin_y, self.global_resolution)
             self.waypoint_added.emit(waypoint)
 
     def draw_origin_point(self):
-        if not self.origin_point or not self.pgm_layer.pixmap: return
-        if not self.origin_layer.pixmap or self.origin_layer.pixmap.size() != self.pgm_layer.pixmap.size():
-            self.origin_layer.pixmap = QPixmap(self.pgm_layer.pixmap.size())
+        if not self.origin_point or not self.pgm_layers: return
+        if not self.origin_layer.pixmap or self.origin_layer.pixmap.size() != self.pgm_layers[0].pixmap.size():
+            self.origin_layer.pixmap = QPixmap(self.pgm_layers[0].pixmap.size())
             self.origin_layer.pixmap.fill(Qt.GlobalColor.transparent)
         self.origin_layer.pixmap.fill(Qt.GlobalColor.transparent)
         painter = QPainter(self.origin_layer.pixmap)
-        painter.setRenderHint(QPainter.RenderHint.Antialiasing)
-        x, y = self.origin_point
-        marker_size = 20
-        pen = QPen(QColor(255, 0, 0))
-        pen.setWidth(3)
-        painter.setPen(pen)
-        painter.drawLine(x - marker_size, y, x + marker_size, y)
-        painter.drawLine(x, y - marker_size, x, y + marker_size)
-        painter.drawEllipse(x - marker_size//2, y - marker_size//2, marker_size, marker_size)
-        painter.end()
+        try:
+            painter.setRenderHint(QPainter.RenderHint.Antialiasing)
+            x, y = self.origin_point
+            marker_size = 20
+            pen = QPen(QColor(255, 0, 0))
+            pen.setWidth(3)
+            painter.setPen(pen)
+            painter.drawLine(x - marker_size, y, x + marker_size, y)
+            painter.drawLine(x, y - marker_size, x, y + marker_size)
+            painter.drawEllipse(x - marker_size//2, y - marker_size//2, marker_size, marker_size)
+        finally:
+            painter.end()
         self.update_display()
 
     def generate_path(self):
         if self.waypoints and len(self.waypoints) >= 2:
-            if not self.path_layer.pixmap or self.path_layer.pixmap.size() != self.pgm_layer.pixmap.size():
-                self.path_layer.pixmap = QPixmap(self.pgm_layer.pixmap.size())
+            if not self.path_layer.pixmap or self.path_layer.pixmap.size() != self.pgm_layers[0].pixmap.size():
+                self.path_layer.pixmap = QPixmap(self.pgm_layers[0].pixmap.size())
             self.path_layer.pixmap.fill(Qt.GlobalColor.transparent)
-            # Use RightPanel to check if path should be generated
-            # Circular dependency check: We'll assume the setting is accessible
-            # This logic might need to be refined if it relies on a specific UI state
             painter = QPainter(self.path_layer.pixmap)
-            painter.setRenderHint(QPainter.RenderHint.Antialiasing)
-            pen = QPen(Qt.GlobalColor.green, 3)
-            pen.setStyle(Qt.PenStyle.SolidLine)
-            painter.setPen(pen)
-            for i in range(len(self.waypoints) - 1):
-                start, end = self.waypoints[i], self.waypoints[i + 1]
-                painter.drawLine(start.pixel_x, start.pixel_y, end.pixel_x, end.pixel_y)
-            painter.end()
+            try:
+                painter.setRenderHint(QPainter.RenderHint.Antialiasing)
+                pen = QPen(QColor(0, 255, 0, 150))
+                pen.setWidth(4)
+                painter.setPen(pen)
+                
+                for i in range(len(self.waypoints) - 1):
+                    p1 = QPoint(self.waypoints[i].pixel_x, self.waypoints[i].pixel_y)
+                    p2 = QPoint(self.waypoints[i+1].pixel_x, self.waypoints[i+1].pixel_y)
+                    painter.drawLine(p1, p2)
+            finally:
+                painter.end()
         else:
             if self.path_layer.pixmap: self.path_layer.pixmap.fill(Qt.GlobalColor.transparent)
         self.update_display()
@@ -929,7 +1160,7 @@ class ImageViewer(QWidget):
         old_state = {'pixel_x': waypoint.pixel_x, 'pixel_y': waypoint.pixel_y, 'angle': waypoint.angle}
         if self.origin_point:
             origin_x, origin_y = self.origin_point
-            waypoint.update_metric_coordinates(origin_x, origin_y, self.resolution)
+            waypoint.update_metric_coordinates(origin_x, origin_y, self.global_resolution)
         self.waypoint_edited.emit(waypoint)
         self.update_display()
         new_state = {'pixel_x': waypoint.pixel_x, 'pixel_y': waypoint.pixel_y, 'angle': waypoint.angle}
@@ -944,15 +1175,22 @@ class ImageViewer(QWidget):
         self.pgm_display.setCursor(Qt.CursorShape.ArrowCursor)
 
     def get_combined_pixmap(self):
-        if not self.pgm_layer.pixmap: return None
-        result = QPixmap(self.pgm_layer.pixmap.size())
+        if not self.pgm_layers: return None
+        result = QPixmap(self.pgm_layers[0].pixmap.size())
         result.fill(Qt.GlobalColor.white)
         painter = QPainter(result)
-        for layer in [self.pgm_layer, self.drawing_layer]:
-            if layer.visible and layer.pixmap:
-                painter.setOpacity(layer.opacity)
-                painter.drawPixmap(0, 0, layer.pixmap)
-        painter.end()
+        try:
+            # すべての地図レイヤーを合成
+            for layer in self.pgm_layers:
+                if layer.visible and layer.pixmap:
+                    painter.setOpacity(layer.opacity)
+                    painter.drawPixmap(0, 0, layer.pixmap)
+            # 図形レイヤーを合成
+            if self.drawing_layer.visible and self.drawing_layer.pixmap:
+                painter.setOpacity(self.drawing_layer.opacity)
+                painter.drawPixmap(0, 0, self.drawing_layer.pixmap)
+        finally:
+            painter.end()
         return result
 
     def import_waypoints_from_yaml(self, yaml_data):
