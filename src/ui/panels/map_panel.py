@@ -918,22 +918,29 @@ class ImageViewer(QWidget):
                 painter.setOpacity(self.origin_layer.opacity)
                 painter.drawPixmap(0, 0, self.origin_layer.pixmap)
             if self.waypoints and self.waypoint_layer.visible:
-                painter.setOpacity(self.waypoint_layer.opacity)
+                # ユーザー要望によりウェイポイントの不透明度を70%程度に設定
+                painter.setOpacity(0.7) 
                 painter.setRenderHint(QPainter.RenderHint.Antialiasing)
                 for waypoint in self.waypoints:
+                    painter.setOpacity(0.7)
                     x, y = waypoint.pixel_x, waypoint.pixel_y
                     base_size = WAYPOINT_SETTINGS['BASE_SIZE']
                     is_editing = (self.pgm_display.edit_mode and self.pgm_display.editing_waypoint and self.pgm_display.editing_waypoint.number == waypoint.number)
                     color = QColor(0, 120, 255, 255) if is_editing else QColor(255, 0, 0, 255)
                     size_multiplier = WAYPOINT_SETTINGS['EDIT_SIZE_MULT'] if is_editing else 1.0
+                    
+                    adjusted_size = base_size * size_multiplier
+                    
+                    # 向きを示す線の描画
                     pen = QPen(color)
                     pen.setWidth(3)
                     painter.setPen(pen)
-                    adjusted_size = base_size * size_multiplier
                     angle_line_length = adjusted_size * WAYPOINT_SETTINGS['ARROW_LENGTH_MULT']
                     end_x = x + int(angle_line_length * np.cos(waypoint.angle))
                     end_y = y - int(angle_line_length * np.sin(waypoint.angle))
                     painter.drawLine(x, y, end_x, end_y)
+                    
+                    # 矢印の描画
                     arrow_size = adjusted_size * WAYPOINT_SETTINGS['ARROW_WIDTH_MULT']
                     arrow_angle1 = waypoint.angle + np.pi * 3/4
                     arrow_angle2 = waypoint.angle - np.pi * 3/4
@@ -943,10 +950,20 @@ class ImageViewer(QWidget):
                     arrow_y2 = end_y - int(arrow_size * np.sin(arrow_angle2))
                     painter.drawLine(end_x, end_y, arrow_x1, arrow_y1)
                     painter.drawLine(end_x, end_y, arrow_x2, arrow_y2)
+                    
+                    # メインの円と向きの矢印を描画 (70%透明)
+                    painter.setOpacity(0.7)
                     painter.setPen(Qt.PenStyle.NoPen)
                     painter.setBrush(color)
                     painter.drawEllipse(x - adjusted_size, y - adjusted_size, adjusted_size * 2, adjusted_size * 2)
-                    painter.setPen(QColor(255, 255, 255, 230))
+                    
+                    # 中心点を強調（小さな白い点, 100%不透明）
+                    painter.setOpacity(1.0)
+                    painter.setBrush(Qt.GlobalColor.white)
+                    painter.drawEllipse(x - 2, y - 2, 4, 4)
+                    
+                    # 番号を描画 (100%不透明)
+                    painter.setPen(QColor(255, 255, 255, 255))
                     font = self.font()
                     font.setPointSize(WAYPOINT_SETTINGS['FONT_SIZE_MAIN_MULT'] * WAYPOINT_SETTINGS['BASE_SIZE'])
                     font.setBold(True)
