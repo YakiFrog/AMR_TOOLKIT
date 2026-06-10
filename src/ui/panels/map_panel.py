@@ -8,7 +8,7 @@ from PySide6.QtCore import Qt, QPoint, Signal, QEvent, QSize, QTimer, QRect
 from PySide6.QtGui import (QPixmap, QImage, QWheelEvent, QPainter, QPen, QCursor,
                            QColor)
 
-from ...core.models import DrawingMode, Waypoint
+from ...core.models import DrawingMode, Waypoint, Landmark
 from ...core.constants import (WAYPOINT_SETTINGS, MIN_SCALE, MAX_SCALE, 
                                DEFAULT_SCALE, SCALE_SENSITIVITY)
 from ...utils.format_manager import format_manager
@@ -109,8 +109,11 @@ class DrawableLabel(QLabel):
     waypoint_clicked = Signal(QPoint)
     waypoint_updated = Signal(Waypoint)
     waypoint_completed = Signal(QPoint)
+    landmark_clicked = Signal(QPoint)
+    landmark_updated = Signal(Landmark)
     mouse_position_changed = Signal(QPoint)
     waypoint_edited = Signal(Waypoint)
+    landmark_edited = Signal(Landmark)
 
     def __init__(self, parent=None):
         super().__init__(parent)
@@ -120,10 +123,12 @@ class DrawableLabel(QLabel):
         self.current_cursor_size = 0
         self.setMouseTracking(True)
         self.temp_waypoint = None
+        self.temp_landmark = None
         self.is_setting_angle = False
         self.click_pos = None
         self.edit_mode = False
         self.editing_waypoint = None
+        self.editing_landmark = None
         self.is_dragging = False
         self.drag_start = None
         self.last_pos = None
@@ -173,14 +178,27 @@ class DrawableLabel(QLabel):
         x = im_pos.x()
         y = im_pos.y()
 
-        if self.edit_mode and self.editing_waypoint:
+        if self.edit_mode and (self.editing_waypoint or self.editing_landmark):
             # 編集モードを終了
             self.edit_mode = False
             self.editing_waypoint = None
+            self.editing_landmark = None
             self.setCursor(Qt.CursorShape.ArrowCursor)
             if self.parent_viewer:
                 self.parent_viewer.update_display()
         else:
+            for landmark in self.parent_viewer.landmarks:
+                hover_range = max(6, int(WAYPOINT_SETTINGS['BASE_SIZE'] * 1.6))
+                if abs(landmark.pixel_x - x) < hover_range and abs(landmark.pixel_y - y) < hover_range:
+                    self.edit_mode = True
+                    self.editing_waypoint = None
+                    self.editing_landmark = landmark
+                    self.setCursor(Qt.CursorShape.SizeAllCursor)
+                    if self.parent_viewer:
+                        self.parent_viewer.show_edit_message("ランドマーク: ドラッグで移動、Shift+ドラッグで角度を変更")
+                        self.parent_viewer.update_display()
+                    return
+
             # クリックされた位置にあるウェイポイントを探す
             for waypoint in self.parent_viewer.waypoints:
                 hover_range = max(6, int(WAYPOINT_SETTINGS['BASE_SIZE'] * 1.6))
@@ -201,17 +219,24 @@ class DrawableLabel(QLabel):
                     self.click_pos = pos
                     self.is_setting_angle = True
                     self.waypoint_clicked.emit(pos)
+            elif self.parent_viewer.drawing_mode == DrawingMode.LANDMARK:
+                if event.button() == Qt.MouseButton.LeftButton:
+                    pos = event.position().toPoint()
+                    self.click_pos = pos
+                    self.is_setting_angle = True
+                    self.landmark_clicked.emit(pos)
             else:
                 pos = event.position().toPoint()
                 self.last_pos = pos
                 self.parent_viewer.draw_line(pos, pos)
-        elif self.edit_mode and self.editing_waypoint:
+        elif self.edit_mode and (self.editing_waypoint or self.editing_landmark):
             pos = event.position().toPoint()
             im_pos = self.parent_viewer.display_to_image_coords(pos)
             if im_pos is None:
                 return
             x = im_pos.x()
             y = im_pos.y()
+            editing_item = self.editing_waypoint or self.editing_landmark
 
             if event.modifiers() & Qt.KeyboardModifier.ShiftModifier:
                 # Shiftキーが押されている場合は角度編集モード
@@ -219,10 +244,13 @@ class DrawableLabel(QLabel):
                 self.editing_start_pos = pos
             else:
                 # 通常クリックは位置の移動
-                self.editing_waypoint.set_position(x, y)
+                editing_item.set_position(x, y)
                 if self.parent_viewer:
                     self.parent_viewer.update_display()
-                    self.parent_viewer.waypoint_edited.emit(self.editing_waypoint)
+                    if self.editing_waypoint:
+                        self.parent_viewer.waypoint_edited.emit(self.editing_waypoint)
+                    else:
+                        self.parent_viewer.landmark_edited.emit(self.editing_landmark)
         else:
             event.ignore()
 
@@ -258,6 +286,14 @@ class DrawableLabel(QLabel):
                 
                 QToolTip.hideText()
 
+            for landmark in self.parent_viewer.landmarks:
+                if abs(landmark.pixel_x - x) < hover_range and abs(landmark.pixel_y - y) < hover_range:
+                    QToolTip.showText(
+                        QPoint(int(event.globalPosition().x()), int(event.globalPosition().y())),
+                        f"<b>Landmark:</b> {landmark.name}<br>x: {landmark.x:.2f}<br>y: {landmark.y:.2f}"
+                    )
+                    return
+
         if self.drawing_enabled and self.parent_viewer:
             if self.is_setting_angle and self.parent_viewer.drawing_mode == DrawingMode.WAYPOINT:
                 if self.temp_waypoint and self.click_pos:
@@ -266,29 +302,40 @@ class DrawableLabel(QLabel):
                     angle = np.arctan2(dy, dx)
                     self.temp_waypoint.set_angle(angle)
                     self.waypoint_updated.emit(self.temp_waypoint)
+            elif self.is_setting_angle and self.parent_viewer.drawing_mode == DrawingMode.LANDMARK:
+                if self.temp_landmark and self.click_pos:
+                    dx = pos.x() - self.click_pos.x()
+                    dy = -(pos.y() - self.click_pos.y())
+                    angle = np.arctan2(dy, dx)
+                    self.temp_landmark.set_angle(angle)
+                    self.landmark_updated.emit(self.temp_landmark)
             elif self.last_pos:
                 self.parent_viewer.draw_line(self.last_pos, pos)
                 self.last_pos = pos
                 self.updateCursor()
-        elif self.edit_mode and self.editing_waypoint:
+        elif self.edit_mode and (self.editing_waypoint or self.editing_landmark):
             pos = event.position().toPoint()
             im_pos = self.parent_viewer.display_to_image_coords(pos)
             if im_pos is None:
                 return
             x = im_pos.x()
             y = im_pos.y()
+            editing_item = self.editing_waypoint or self.editing_landmark
 
             if self.is_editing_angle:
                 dx = pos.x() - self.editing_start_pos.x()
                 dy = -(pos.y() - self.editing_start_pos.y())
                 angle = np.arctan2(dy, dx)
-                self.editing_waypoint.set_angle(angle)
+                editing_item.set_angle(angle)
             else:
-                self.editing_waypoint.set_position(x, y)
+                editing_item.set_position(x, y)
 
             if self.parent_viewer:
                 self.parent_viewer.update_display()
-                self.parent_viewer.waypoint_edited.emit(self.editing_waypoint)
+                if self.editing_waypoint:
+                    self.parent_viewer.waypoint_edited.emit(self.editing_waypoint)
+                else:
+                    self.parent_viewer.landmark_edited.emit(self.editing_landmark)
         else:
             event.ignore()
 
@@ -302,16 +349,24 @@ class DrawableLabel(QLabel):
                     final_angle = np.arctan2(dy, dx)
                     self.temp_waypoint.set_angle(final_angle)
                     self.waypoint_completed.emit(current_pos)
+                if self.temp_landmark:
+                    final_angle = np.arctan2(dy, dx)
+                    self.temp_landmark.set_angle(final_angle)
+                    self.landmark_updated.emit(self.temp_landmark)
             self.is_setting_angle = False
             self.temp_waypoint = None
+            self.temp_landmark = None
             self.click_pos = None
             self.last_pos = None
             event.accept()
-        elif self.edit_mode and self.editing_waypoint:
+        elif self.edit_mode and (self.editing_waypoint or self.editing_landmark):
             self.is_editing_angle = False
             if self.parent_viewer:
                 self.parent_viewer.update_display()
-                self.parent_viewer.waypoint_edited.emit(self.editing_waypoint)
+                if self.editing_waypoint:
+                    self.parent_viewer.waypoint_edited.emit(self.editing_waypoint)
+                else:
+                    self.parent_viewer.landmark_edited.emit(self.editing_landmark)
             event.accept()
         else:
             event.ignore()
@@ -356,6 +411,9 @@ class ImageViewer(QWidget):
     waypoint_added = Signal(Waypoint)
     waypoint_removed = Signal(int)
     waypoint_edited = Signal(Waypoint)
+    landmark_added = Signal(Landmark)
+    landmark_removed = Signal(int)
+    landmark_edited = Signal(Landmark)
     history_changed = Signal(bool, bool)
     
     def __init__(self):
@@ -397,6 +455,7 @@ class ImageViewer(QWidget):
         self.drawing_layer = Layer("Drawing Layer")
         self.path_layer = Layer("Path Layer")
         self.waypoint_layer = Layer("Waypoint Layer")
+        self.landmark_layer = Layer("Landmark Layer")
         self.origin_layer = Layer("Origin Layer")
         
         # UI表示用のレイヤーリスト（管理しやすくするため）
@@ -404,6 +463,7 @@ class ImageViewer(QWidget):
             self.drawing_layer,
             self.path_layer,
             self.waypoint_layer,
+            self.landmark_layer,
             self.origin_layer
         ]
         self.active_layer = self.drawing_layer
@@ -412,6 +472,7 @@ class ImageViewer(QWidget):
             layer.changed.connect(self.on_layer_changed)
 
         self.waypoints = []
+        self.landmarks = []
         self.waypoint_size = 15
         self.show_grid = False
         self.grid_size = 50
@@ -427,6 +488,7 @@ class ImageViewer(QWidget):
         self.setup_drawing_tools()
 
         self.pgm_display.waypoint_edited.connect(self.handle_waypoint_edited)
+        self.pgm_display.landmark_edited.connect(self.handle_landmark_edited)
         self.scroll_area.scale_changed.connect(self.handle_scale_change)
 
         self.history = []
@@ -451,6 +513,8 @@ class ImageViewer(QWidget):
         self.pgm_display.setStyleSheet("background-color: white;")
         self.pgm_display.waypoint_clicked.connect(self.add_waypoint)
         self.pgm_display.waypoint_updated.connect(self.update_waypoint)
+        self.pgm_display.landmark_clicked.connect(self.add_landmark)
+        self.pgm_display.landmark_updated.connect(self.update_landmark)
         self.pgm_display.mouse_position_changed.connect(self.update_mouse_position)
 
         self.status_label = QLabel(self.scroll_area.viewport())
@@ -521,10 +585,15 @@ class ImageViewer(QWidget):
         self.waypoint_button = QPushButton("ウェイポイント")
         self.waypoint_button.setCheckable(True)
         self.waypoint_button.clicked.connect(lambda: self.set_drawing_mode(DrawingMode.WAYPOINT))
+
+        self.landmark_button = QPushButton("ランドマーク")
+        self.landmark_button.setCheckable(True)
+        self.landmark_button.clicked.connect(lambda: self.set_drawing_mode(DrawingMode.LANDMARK))
         
         buttons_layout.addWidget(self.pen_button)
         buttons_layout.addWidget(self.eraser_button)
         buttons_layout.addWidget(self.waypoint_button)
+        buttons_layout.addWidget(self.landmark_button)
         
         sliders_layout = QHBoxLayout()
         pen_slider_layout = QVBoxLayout()
@@ -568,6 +637,7 @@ class ImageViewer(QWidget):
             self.pen_button.setChecked(False)
             self.eraser_button.setChecked(False)
             self.waypoint_button.setChecked(False)
+            self.landmark_button.setChecked(False)
             self.pgm_display.set_drawing_mode(False)
             self.scroll_area.set_drawing_mode(False)
             return
@@ -576,10 +646,11 @@ class ImageViewer(QWidget):
         self.pen_button.setChecked(mode == DrawingMode.PEN)
         self.eraser_button.setChecked(mode == DrawingMode.ERASER)
         self.waypoint_button.setChecked(mode == DrawingMode.WAYPOINT)
+        self.landmark_button.setChecked(mode == DrawingMode.LANDMARK)
         self.pgm_display.set_drawing_mode(mode != DrawingMode.NONE)
         self.scroll_area.set_drawing_mode(mode != DrawingMode.NONE)
         if (mode != DrawingMode.NONE):
-            if (mode == DrawingMode.WAYPOINT):
+            if mode in (DrawingMode.WAYPOINT, DrawingMode.LANDMARK):
                 self.pgm_display.setCursor(Qt.CursorShape.CrossCursor)
             else:
                 self.pgm_display.updateCursor()
@@ -827,6 +898,27 @@ class ImageViewer(QWidget):
         self.update_display()
         self.waypoint_added.emit(waypoint)
 
+    def add_landmark(self, pos):
+        if not self.pgm_layers or not self.pgm_layers[0].pixmap:
+            return
+        im_pos = self.display_to_image_coords(pos)
+        if im_pos is None:
+            return
+        x, y = im_pos.x(), im_pos.y()
+        landmark = Landmark(x, y)
+        if self.origin_point:
+            origin_x, origin_y = self.origin_point
+            landmark.update_metric_coordinates(origin_x, origin_y, self.resolution)
+        self.landmarks.append(landmark)
+        self.pgm_display.temp_landmark = landmark
+        self.landmark_added.emit(landmark)
+        self.update_display()
+        self.add_to_history({'type': 'landmark_add', 'landmark': landmark})
+
+    def update_landmark(self, landmark):
+        self.update_display()
+        self.landmark_edited.emit(landmark)
+
     def update_display(self):
         """描画更新（デバウンス処理付き）"""
         if not self.pgm_layers:
@@ -993,6 +1085,50 @@ class ImageViewer(QWidget):
                         painter.drawEllipse(attr_x - 8, attr_y - 12, 16, 16)
                         painter.drawText(attr_x - 3, attr_y, attr_text)
                     waypoint.hover_rect = QRect(x - adjusted_size, y - adjusted_size, adjusted_size * 2, adjusted_size * 2)
+            if self.landmarks and self.landmark_layer.visible:
+                painter.setRenderHint(QPainter.RenderHint.Antialiasing)
+                base_size = WAYPOINT_SETTINGS['BASE_SIZE']
+                for landmark in self.landmarks:
+                    x, y = landmark.pixel_x, landmark.pixel_y
+                    is_editing = (
+                        self.pgm_display.edit_mode
+                        and self.pgm_display.editing_landmark
+                        and self.pgm_display.editing_landmark.number == landmark.number
+                    )
+                    color = QColor(16, 185, 129, 235) if not is_editing else QColor(245, 158, 11, 255)
+                    adjusted_size = int(base_size * (1.25 if is_editing else 1.0))
+
+                    pen = QPen(color)
+                    pen.setWidth(3)
+                    painter.setPen(pen)
+                    angle_line_length = adjusted_size * WAYPOINT_SETTINGS['ARROW_LENGTH_MULT']
+                    end_x = x + int(angle_line_length * np.cos(landmark.angle))
+                    end_y = y - int(angle_line_length * np.sin(landmark.angle))
+                    painter.drawLine(x, y, end_x, end_y)
+
+                    painter.setBrush(color)
+                    diamond = [
+                        QPoint(x, y - adjusted_size),
+                        QPoint(x + adjusted_size, y),
+                        QPoint(x, y + adjusted_size),
+                        QPoint(x - adjusted_size, y),
+                    ]
+                    painter.drawPolygon(diamond)
+
+                    painter.setPen(QColor(15, 23, 42))
+                    painter.setBrush(QColor(255, 255, 255, 230))
+                    font = self.font()
+                    font.setPointSize(10)
+                    font.setBold(True)
+                    painter.setFont(font)
+                    text = landmark.name
+                    metrics = painter.fontMetrics()
+                    text_width = metrics.horizontalAdvance(text)
+                    text_height = metrics.height()
+                    label_rect = QRect(x + adjusted_size + 5, y - text_height, text_width + 10, text_height + 6)
+                    painter.drawRoundedRect(label_rect, 4, 4)
+                    painter.drawText(label_rect.adjusted(5, 0, -5, 0), Qt.AlignmentFlag.AlignCenter, text)
+                    landmark.hover_rect = QRect(x - adjusted_size, y - adjusted_size, adjusted_size * 2, adjusted_size * 2)
         finally:
             painter.end()
 
@@ -1049,6 +1185,17 @@ class ImageViewer(QWidget):
         self.waypoints.clear()
         Waypoint.reset_counter()
         self.waypoint_removed.emit(-1)
+        self.update_display()
+
+    def remove_landmark(self, number):
+        self.landmarks = [lm for lm in self.landmarks if lm.number != number]
+        self.landmark_removed.emit(number)
+        self.update_display()
+
+    def remove_all_landmarks(self):
+        self.landmarks.clear()
+        Landmark.reset_counter()
+        self.landmark_removed.emit(-1)
         self.update_display()
 
     def reorder_waypoints(self, source_number, target_number):
@@ -1137,6 +1284,9 @@ class ImageViewer(QWidget):
         for waypoint in self.waypoints:
             waypoint.update_metric_coordinates(origin_x, origin_y, self.global_resolution)
             self.waypoint_added.emit(waypoint)
+        for landmark in self.landmarks:
+            landmark.update_metric_coordinates(origin_x, origin_y, self.global_resolution)
+            self.landmark_edited.emit(landmark)
 
     def draw_origin_point(self):
         if not self.origin_point or not self.pgm_layers: return
@@ -1191,12 +1341,24 @@ class ImageViewer(QWidget):
         new_state = {'pixel_x': waypoint.pixel_x, 'pixel_y': waypoint.pixel_y, 'angle': waypoint.angle}
         self.add_to_history({'type': 'waypoint_edit', 'waypoint': waypoint, 'old_state': old_state, 'new_state': new_state})
 
+    def handle_landmark_edited(self, landmark):
+        old_state = {'pixel_x': landmark.pixel_x, 'pixel_y': landmark.pixel_y, 'angle': landmark.angle, 'name': landmark.name}
+        if self.origin_point:
+            origin_x, origin_y = self.origin_point
+            landmark.update_metric_coordinates(origin_x, origin_y, self.global_resolution)
+        self.landmark_edited.emit(landmark)
+        self.update_display()
+        new_state = {'pixel_x': landmark.pixel_x, 'pixel_y': landmark.pixel_y, 'angle': landmark.angle, 'name': landmark.name}
+        self.add_to_history({'type': 'landmark_edit', 'landmark': landmark, 'old_state': old_state, 'new_state': new_state})
+
     def enter_edit_mode(self, waypoint):
         self.pgm_display.edit_mode, self.pgm_display.editing_waypoint = True, waypoint
+        self.pgm_display.editing_landmark = None
         self.pgm_display.setCursor(Qt.CursorShape.SizeAllCursor)
 
     def exit_edit_mode(self):
         self.pgm_display.edit_mode, self.pgm_display.editing_waypoint = False, None
+        self.pgm_display.editing_landmark = None
         self.pgm_display.setCursor(Qt.CursorShape.ArrowCursor)
 
     def get_combined_pixmap(self):
@@ -1238,6 +1400,60 @@ class ImageViewer(QWidget):
             except Exception as e: print(f"Error importing waypoint: {e}"); continue
         self.update_display()
 
+    def export_landmarks_data(self):
+        map_image = None
+        if self.pgm_layers and getattr(self.pgm_layers[0], 'file_path', None):
+            map_image = os.path.basename(self.pgm_layers[0].file_path)
+
+        return {
+            "format_version": "1.0",
+            "map": {
+                "image": map_image,
+                "resolution": float(self.global_resolution),
+                "origin": list(self.global_origin) if self.global_origin is not None else None,
+            },
+            "landmarks": [
+                {
+                    "name": landmark.name,
+                    "x": round(float(landmark.x), 3),
+                    "y": round(float(landmark.y), 3),
+                    "yaw": round(float(landmark.angle), 3),
+                    "aliases": list(getattr(landmark, "aliases", [])),
+                }
+                for landmark in self.landmarks
+            ],
+        }
+
+    def import_landmarks_from_json(self, data):
+        landmarks = data.get("landmarks", [])
+        self.landmarks.clear()
+        Landmark.reset_counter()
+        if not self.origin_point:
+            return
+
+        origin_x, origin_y = self.origin_point
+        resolution = self.global_resolution or self.resolution
+        for lm_data in landmarks:
+            try:
+                x_m = float(lm_data.get("x", 0.0))
+                y_m = float(lm_data.get("y", 0.0))
+                px = int(origin_x + (x_m / resolution))
+                py = int(origin_y - (y_m / resolution))
+                landmark = Landmark(
+                    px,
+                    py,
+                    float(lm_data.get("yaw", lm_data.get("angle", 0.0))),
+                    str(lm_data.get("name", "")).strip() or None,
+                )
+                landmark.aliases = list(lm_data.get("aliases", []))
+                landmark.update_metric_coordinates(origin_x, origin_y, resolution)
+                self.landmarks.append(landmark)
+                self.landmark_added.emit(landmark)
+            except Exception as e:
+                print(f"Error importing landmark: {e}")
+                continue
+        self.update_display()
+
     def add_to_history(self, action):
         self.history = self.history[:self.current_index + 1]
         self.history.append(action)
@@ -1253,9 +1469,13 @@ class ImageViewer(QWidget):
         action = self.history[self.current_index]
         self.current_index -= 1
         if action['type'] == 'waypoint_add': self.remove_waypoint(action['waypoint'].number)
+        elif action['type'] == 'landmark_add': self.remove_landmark(action['landmark'].number)
         elif action['type'] == 'waypoint_remove':
             self.waypoints.append(action['waypoint'])
             self.waypoint_added.emit(action['waypoint'])
+        elif action['type'] == 'landmark_remove':
+            self.landmarks.append(action['landmark'])
+            self.landmark_added.emit(action['landmark'])
         elif action['type'] == 'waypoint_edit':
             wp, old = action['waypoint'], action['old_state']
             wp.pixel_x, wp.pixel_y, wp.angle = old['pixel_x'], old['pixel_y'], old['angle']
@@ -1263,6 +1483,14 @@ class ImageViewer(QWidget):
                 o_x, o_y = self.origin_point
                 wp.update_metric_coordinates(o_x, o_y, self.resolution)
             self.waypoint_edited.emit(wp)
+        elif action['type'] == 'landmark_edit':
+            lm, old = action['landmark'], action['old_state']
+            lm.pixel_x, lm.pixel_y, lm.angle = old['pixel_x'], old['pixel_y'], old['angle']
+            lm.set_name(old.get('name', lm.name))
+            if self.origin_point:
+                o_x, o_y = self.origin_point
+                lm.update_metric_coordinates(o_x, o_y, self.resolution)
+            self.landmark_edited.emit(lm)
         elif action['type'] == 'draw': self.drawing_layer.pixmap = action['old_pixmap']
         self.update_display()
         self.history_changed.emit(self.can_undo(), self.can_redo())
@@ -1274,7 +1502,11 @@ class ImageViewer(QWidget):
         if action['type'] == 'waypoint_add':
             self.waypoints.append(action['waypoint'])
             self.waypoint_added.emit(action['waypoint'])
+        elif action['type'] == 'landmark_add':
+            self.landmarks.append(action['landmark'])
+            self.landmark_added.emit(action['landmark'])
         elif action['type'] == 'waypoint_remove': self.remove_waypoint(action['waypoint'].number)
+        elif action['type'] == 'landmark_remove': self.remove_landmark(action['landmark'].number)
         elif action['type'] == 'waypoint_edit':
             wp, new = action['waypoint'], action['new_state']
             wp.pixel_x, wp.pixel_y, wp.angle = new['pixel_x'], new['pixel_y'], new['angle']
@@ -1282,6 +1514,14 @@ class ImageViewer(QWidget):
                 o_x, o_y = self.origin_point
                 wp.update_metric_coordinates(o_x, o_y, self.resolution)
             self.waypoint_edited.emit(wp)
+        elif action['type'] == 'landmark_edit':
+            lm, new = action['landmark'], action['new_state']
+            lm.pixel_x, lm.pixel_y, lm.angle = new['pixel_x'], new['pixel_y'], new['angle']
+            lm.set_name(new.get('name', lm.name))
+            if self.origin_point:
+                o_x, o_y = self.origin_point
+                lm.update_metric_coordinates(o_x, o_y, self.resolution)
+            self.landmark_edited.emit(lm)
         elif action['type'] == 'draw': self.drawing_layer.pixmap = action['new_pixmap']
         self.update_display()
         self.history_changed.emit(self.can_undo(), self.can_redo())

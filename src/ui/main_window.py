@@ -2,6 +2,7 @@ import sys
 import os
 import numpy as np
 import yaml
+import json
 from collections import OrderedDict
 
 from PySide6.QtWidgets import (QMainWindow, QWidget, QVBoxLayout, QSplitter, 
@@ -79,6 +80,14 @@ class MainWindow(QMainWindow):
         self.right_panel.waypoint_reorder_requested.connect(self.image_viewer.reorder_waypoints)
         self.right_panel.generate_path_requested.connect(self.image_viewer.generate_path)
         self.image_viewer.waypoint_edited.connect(self.right_panel.add_waypoint_to_list)
+        self.image_viewer.landmark_added.connect(self.right_panel.add_landmark_to_list)
+        self.image_viewer.landmark_edited.connect(self.right_panel.add_landmark_to_list)
+        self.image_viewer.landmark_removed.connect(self.right_panel.remove_landmark_from_list)
+        self.right_panel.landmark_delete_requested.connect(self.image_viewer.remove_landmark)
+        self.right_panel.all_landmarks_delete_requested.connect(self.image_viewer.remove_all_landmarks)
+        self.right_panel.landmark_name_changed.connect(self.handle_landmark_name_changed)
+        self.right_panel.landmark_import_requested.connect(self.import_landmarks_json)
+        self.right_panel.landmark_export_requested.connect(self.export_landmarks_json)
         self.right_panel.export_requested.connect(self.handle_export)
         self.right_panel.waypoint_import_requested.connect(self.import_waypoints_yaml)
         self.right_panel.layer_add_requested.connect(self.handle_layer_add_requested)
@@ -240,6 +249,42 @@ class MainWindow(QMainWindow):
             self.image_viewer.import_waypoints_from_yaml(ordered_data)
         except Exception as e:
             QMessageBox.critical(self, "Error", f"Error importing waypoints: {str(e)}")
+
+    def export_landmarks_json(self):
+        """ランドマークをJSONファイルとしてエクスポート"""
+        file_name, _ = QFileDialog.getSaveFileName(
+            self,
+            "Export Landmarks JSON",
+            "",
+            "JSON Files (*.json);;All Files (*)"
+        )
+        if not file_name:
+            return
+        if not file_name.lower().endswith(".json"):
+            file_name += ".json"
+        try:
+            with open(file_name, "w", encoding="utf-8") as f:
+                json.dump(self.image_viewer.export_landmarks_data(), f, ensure_ascii=False, indent=2)
+        except Exception as e:
+            QMessageBox.critical(self, "Error", f"Failed to save landmarks: {str(e)}")
+
+    def import_landmarks_json(self, file_path):
+        """ランドマークJSONをインポート"""
+        try:
+            with open(file_path, "r", encoding="utf-8") as f:
+                data = json.load(f)
+            self.right_panel.clear_landmark_list()
+            self.image_viewer.import_landmarks_from_json(data)
+        except Exception as e:
+            QMessageBox.critical(self, "Error", f"Error importing landmarks: {str(e)}")
+
+    def handle_landmark_name_changed(self, number, name):
+        landmark = next((lm for lm in self.image_viewer.landmarks if lm.number == number), None)
+        if not landmark:
+            return
+        landmark.set_name(name)
+        self.image_viewer.landmark_edited.emit(landmark)
+        self.image_viewer.update_display()
 
     def update_history_buttons(self, can_undo, can_redo):
         """戻る/進むボタンの状態を更新"""

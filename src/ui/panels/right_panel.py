@@ -1,5 +1,7 @@
+import numpy as np
 from PySide6.QtWidgets import (QWidget, QVBoxLayout, QHBoxLayout, QLabel, 
-                               QPushButton, QScrollArea, QCheckBox, QFileDialog)
+                               QPushButton, QScrollArea, QCheckBox, QFileDialog,
+                               QLineEdit)
 from PySide6.QtCore import Qt, Signal, QTimer
 from PySide6.QtGui import QCursor
 
@@ -7,11 +9,68 @@ from ..widgets.waypoint_item_widget import WaypointListItem
 from ..widgets.layer_widget import LayerControl
 from .format_editor_panel import FormatEditorPanel
 
+
+class LandmarkListItem(QWidget):
+    delete_clicked = Signal(int)
+    name_changed = Signal(int, str)
+
+    def __init__(self, landmark):
+        super().__init__()
+        self.landmark = landmark
+        self.setup_ui()
+        self.update_label()
+
+    def setup_ui(self):
+        layout = QVBoxLayout(self)
+        layout.setContentsMargins(6, 6, 6, 6)
+        layout.setSpacing(4)
+
+        top_layout = QHBoxLayout()
+        self.name_edit = QLineEdit(self.landmark.name)
+        self.name_edit.setPlaceholderText("ランドマーク名")
+        self.name_edit.editingFinished.connect(self.emit_name_changed)
+
+        delete_button = QPushButton("×")
+        delete_button.setFixedSize(24, 24)
+        delete_button.setToolTip("ランドマークを削除")
+        delete_button.clicked.connect(lambda: self.delete_clicked.emit(self.landmark.number))
+
+        top_layout.addWidget(self.name_edit, 1)
+        top_layout.addWidget(delete_button)
+
+        self.detail_label = QLabel()
+        self.detail_label.setStyleSheet("color: #334155; font-size: 11px;")
+
+        layout.addLayout(top_layout)
+        layout.addWidget(self.detail_label)
+        self.setStyleSheet("""
+            LandmarkListItem {
+                background-color: #ffffff;
+                border: 1px solid #cbd5e1;
+                border-radius: 6px;
+            }
+        """)
+
+    def emit_name_changed(self):
+        self.name_changed.emit(self.landmark.number, self.name_edit.text())
+
+    def update_label(self):
+        self.name_edit.blockSignals(True)
+        self.name_edit.setText(self.landmark.name)
+        self.name_edit.blockSignals(False)
+        degrees = int(self.landmark.angle * 180 / np.pi)
+        self.detail_label.setText(f"x={self.landmark.x:.2f}, y={self.landmark.y:.2f}, yaw={degrees}°")
+
 class RightPanel(QWidget):
     """右側のパネル"""
     waypoint_delete_requested = Signal(int)  # 新しいシグナルを追加
     all_waypoints_delete_requested = Signal()  # 新しいシグナル
     waypoint_reorder_requested = Signal(int, int)  # 順序変更シグナルを追加
+    landmark_delete_requested = Signal(int)
+    all_landmarks_delete_requested = Signal()
+    landmark_name_changed = Signal(int, str)
+    landmark_import_requested = Signal(str)
+    landmark_export_requested = Signal()
     generate_path_requested = Signal()  # パス生成用シグナル
     export_requested = Signal(bool, bool)  # (export_pgm, export_waypoints)
     waypoint_import_requested = Signal(str)  # YAMLファイルパスを送信
@@ -20,6 +79,7 @@ class RightPanel(QWidget):
     def __init__(self):
         super().__init__()
         self.waypoint_widgets = {}  # ウェイポイントウィジェットを保持する辞書
+        self.landmark_widgets = {}
         self.setup_ui()
 
     def setup_ui(self):
@@ -40,6 +100,9 @@ class RightPanel(QWidget):
         # ウェイポイントリストパネルを追加
         self.waypoint_widget = self.create_waypoint_panel()
         layout.addWidget(self.waypoint_widget)
+
+        self.landmark_widget = self.create_landmark_panel()
+        layout.addWidget(self.landmark_widget)
         
         # Format Editor を追加
         self.format_editor = FormatEditorPanel()
@@ -314,6 +377,68 @@ class RightPanel(QWidget):
         
         return widget
 
+    def create_landmark_panel(self):
+        """ランドマーク編集パネルを作成"""
+        widget = QWidget()
+        layout = QVBoxLayout(widget)
+        layout.setSpacing(5)
+
+        header_layout = QHBoxLayout()
+        title_label = QLabel("Landmarks")
+        title_label.setStyleSheet("""
+            QLabel {
+                font-size: 13px;
+                font-weight: 800;
+                color: #000000;
+                padding: 8px 12px;
+                background-color: #cbd5e1;
+                border-bottom: 2px solid #64748b;
+                border-top-left-radius: 6px;
+                border-top-right-radius: 6px;
+            }
+        """)
+
+        import_button = QPushButton("Import")
+        import_button.setToolTip("Import Landmarks from JSON")
+        import_button.clicked.connect(self.handle_import_landmarks)
+
+        export_button = QPushButton("Export")
+        export_button.setToolTip("Export Landmarks to JSON")
+        export_button.clicked.connect(self.landmark_export_requested.emit)
+
+        clear_button = QPushButton("×")
+        clear_button.setFixedSize(24, 24)
+        clear_button.setToolTip("すべてのランドマークを削除")
+        clear_button.clicked.connect(self.all_landmarks_delete_requested.emit)
+
+        header_layout.addWidget(title_label)
+        header_layout.addWidget(import_button)
+        header_layout.addWidget(export_button)
+        header_layout.addStretch()
+        header_layout.addWidget(clear_button)
+
+        scroll_area = QScrollArea()
+        scroll_area.setWidgetResizable(True)
+        scroll_area.setMinimumHeight(120)
+        scroll_area.setMaximumHeight(240)
+        scroll_area.setStyleSheet("""
+            QScrollArea {
+                background-color: white;
+                border: 1px solid #e2e8f0;
+                border-radius: 6px;
+            }
+        """)
+
+        self.landmark_list = QWidget()
+        self.landmark_list_layout = QVBoxLayout(self.landmark_list)
+        self.landmark_list_layout.setSpacing(4)
+        self.landmark_list_layout.setAlignment(Qt.AlignmentFlag.AlignTop)
+        scroll_area.setWidget(self.landmark_list)
+
+        layout.addLayout(header_layout)
+        layout.addWidget(scroll_area)
+        return widget
+
     def handle_import_waypoints(self):
         """Waypointのインポート処理"""
         file_name, _ = QFileDialog.getOpenFileName(
@@ -324,6 +449,16 @@ class RightPanel(QWidget):
         )
         if file_name:
             self.waypoint_import_requested.emit(file_name)
+
+    def handle_import_landmarks(self):
+        file_name, _ = QFileDialog.getOpenFileName(
+            self,
+            "Import Landmarks JSON",
+            "",
+            "JSON Files (*.json);;All Files (*)"
+        )
+        if file_name:
+            self.landmark_import_requested.emit(file_name)
 
     def handle_export(self):
         """エクスポートボタンクリック時の処理"""
@@ -394,6 +529,31 @@ class RightPanel(QWidget):
             item = self.waypoint_list_layout.takeAt(0)
             if widget := item.widget(): widget.deleteLater()
         self.waypoint_widgets.clear()
+
+    def add_landmark_to_list(self, landmark):
+        if landmark.number in self.landmark_widgets:
+            self.landmark_widgets[landmark.number].update_label()
+            return
+        landmark_item = LandmarkListItem(landmark)
+        self.landmark_widgets[landmark.number] = landmark_item
+        landmark_item.delete_clicked.connect(self.landmark_delete_requested.emit)
+        landmark_item.name_changed.connect(self.landmark_name_changed.emit)
+        self.landmark_list_layout.addWidget(landmark_item)
+
+    def remove_landmark_from_list(self, number):
+        if number == -1:
+            self.clear_landmark_list()
+            return
+        if number in self.landmark_widgets:
+            widget = self.landmark_widgets.pop(number)
+            self.landmark_list_layout.removeWidget(widget)
+            widget.deleteLater()
+
+    def clear_landmark_list(self):
+        while self.landmark_list_layout.count():
+            item = self.landmark_list_layout.takeAt(0)
+            if widget := item.widget(): widget.deleteLater()
+        self.landmark_widgets.clear()
 
     def update_layer_list(self, layers):
         for i in reversed(range(self.layer_list_layout.count())): 

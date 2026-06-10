@@ -2,6 +2,7 @@ import sys
 import os
 import numpy as np
 import yaml  # PyYAMLをインポート
+import json
 from PySide6.QtWidgets import (QApplication, QMainWindow, QWidget, QVBoxLayout, 
                               QHBoxLayout, QMenuBar, QMenu, QLabel, QPushButton,
                               QFileDialog, QScrollArea, QSplitter, QGesture, 
@@ -9,7 +10,7 @@ from PySide6.QtWidgets import (QApplication, QMainWindow, QWidget, QVBoxLayout,
                               QMessageBox, QDialog, QLineEdit, QToolTip)
 from PySide6.QtCore import Qt, QPoint, Signal, QEvent, QSize, QMimeData, QTimer, QRect
 from PySide6.QtGui import (QPixmap, QImage, QWheelEvent, QPainter, QPen, QCursor,
-                          QDrag, QColor)  # QDragをQtGuiからインポート
+                          QDrag, QColor, QPolygon)  # QDragをQtGuiからインポート
 from enum import Enum
 from collections import OrderedDict
 
@@ -67,6 +68,7 @@ class DrawingMode(Enum):
     PEN = 1
     ERASER = 2
     WAYPOINT = 3
+    LANDMARK = 4
 
 class Waypoint:
     """ウェイポイントを管理するクラス"""
@@ -137,6 +139,56 @@ class Waypoint:
     def get_attribute(self, key, default=None):
         """属性を取得"""
         return self.attributes.get(key, default)
+
+
+class Landmark:
+    """名前付きランドマークを管理するクラス"""
+    counter = 0
+
+    @classmethod
+    def reset_counter(cls):
+        cls.counter = 0
+
+    def __init__(self, pixel_x, pixel_y, angle=0, name=None):
+        Landmark.counter += 1
+        self.number = Landmark.counter
+        self.pixel_x = pixel_x
+        self.pixel_y = pixel_y
+        self.x = 0
+        self.y = 0
+        self.angle = angle
+        self.name = name if name else f"Landmark {self.number}"
+        self.aliases = []
+        self.resolution = 0.05
+        self.update_display_name()
+
+    def set_angle(self, angle):
+        self.angle = angle
+        self.update_display_name()
+
+    def set_name(self, name):
+        cleaned = str(name).strip()
+        if cleaned:
+            self.name = cleaned
+        self.update_display_name()
+
+    def update_display_name(self):
+        degrees = int(self.angle * 180 / np.pi)
+        self.display_name = f"{self.name} ({self.x:.2f}, {self.y:.2f}) {degrees}°"
+
+    def update_metric_coordinates(self, origin_x, origin_y, resolution):
+        self._origin_x = origin_x
+        self._origin_y = origin_y
+        self.resolution = resolution
+        self.x = (self.pixel_x - origin_x) / 20
+        self.y = (-self.pixel_y + origin_y) / 20
+        self.update_display_name()
+
+    def set_position(self, x, y):
+        self.pixel_x = x
+        self.pixel_y = y
+        if hasattr(self, '_origin_x') and hasattr(self, '_origin_y'):
+            self.update_metric_coordinates(self._origin_x, self._origin_y, self.resolution)
 
 class CustomScrollArea(QScrollArea):
     """カスタムスクロールエリアクラス
@@ -232,8 +284,11 @@ class DrawableLabel(QLabel):
     waypoint_clicked = Signal(QPoint)  # ウェイポイト追加用のシグナルを追加
     waypoint_updated = Signal(Waypoint)  # 角度更新用のシグナルを追加
     waypoint_completed = Signal(QPoint)  # 角度確定用のシグナルを追加
+    landmark_clicked = Signal(QPoint)
+    landmark_updated = Signal(Landmark)
     mouse_position_changed = Signal(QPoint)  # マウス位置シグナルを追加
     waypoint_edited = Signal(Waypoint)  # ウェイポイント編集完了時のシグナル
+    landmark_edited = Signal(Landmark)
 
     def __init__(self, parent=None):
         super().__init__(parent)
@@ -243,10 +298,12 @@ class DrawableLabel(QLabel):
         self.current_cursor_size = 0  # 現在のカーソルサイズ
         self.setMouseTracking(True)
         self.temp_waypoint = None  # 一時的なウェイポイント保存用
+        self.temp_landmark = None
         self.is_setting_angle = False  # 角度設定中フラグ
         self.click_pos = None  # クリック位置を保存
         self.edit_mode = False  # 編集モード状態
         self.editing_waypoint = None  # 編集中のウェイポイント
+        self.editing_landmark = None
         self.is_dragging = False
         self.drag_start = None
         self.last_pos = None  # Add this line
@@ -300,14 +357,27 @@ class DrawableLabel(QLabel):
         x = im_pos.x()
         y = im_pos.y()
 
-        if self.edit_mode and self.editing_waypoint:
+        if self.edit_mode and (self.editing_waypoint or self.editing_landmark):
             # 編集モードを終了
             self.edit_mode = False
             self.editing_waypoint = None
+            self.editing_landmark = None
             self.setCursor(Qt.CursorShape.ArrowCursor)
             if self.parent_viewer:
                 self.parent_viewer.update_display()  # 表示を更新して赤色に戻す
         else:
+            for landmark in self.parent_viewer.landmarks:
+                hover_range = max(6, int(WAYPOINT_SETTINGS['BASE_SIZE'] * 1.6))
+                if abs(landmark.pixel_x - x) < hover_range and abs(landmark.pixel_y - y) < hover_range:
+                    self.edit_mode = True
+                    self.editing_waypoint = None
+                    self.editing_landmark = landmark
+                    self.setCursor(Qt.CursorShape.SizeAllCursor)
+                    if self.parent_viewer:
+                        self.parent_viewer.show_edit_message("ランドマーク: ドラッグで移動、Shift+ドラッグで角度を変更")
+                        self.parent_viewer.update_display()
+                    return
+
             # クリックされた位置にあるウェイポイントを探す
             for waypoint in self.parent_viewer.waypoints:
                 hover_range = max(6, int(WAYPOINT_SETTINGS['BASE_SIZE'] * 1.6))
@@ -329,17 +399,24 @@ class DrawableLabel(QLabel):
                     self.click_pos = pos  # クリック位置を保存
                     self.is_setting_angle = True
                     self.waypoint_clicked.emit(pos)
+            elif self.parent_viewer.drawing_mode == DrawingMode.LANDMARK:
+                if event.button() == Qt.MouseButton.LeftButton:
+                    pos = event.position().toPoint()
+                    self.click_pos = pos
+                    self.is_setting_angle = True
+                    self.landmark_clicked.emit(pos)
             else:
                 pos = event.position().toPoint()
                 self.last_pos = pos
                 self.parent_viewer.draw_line(pos, pos)  # 点を描画
-        elif self.edit_mode and self.editing_waypoint:
+        elif self.edit_mode and (self.editing_waypoint or self.editing_landmark):
             pos = event.position().toPoint()
             im_pos = self.parent_viewer.display_to_image_coords(pos)
             if im_pos is None:
                 return
             x = im_pos.x()
             y = im_pos.y()
+            editing_item = self.editing_waypoint or self.editing_landmark
 
             if event.modifiers() & Qt.KeyboardModifier.ShiftModifier:
                 # Shiftキーが押されている場合は角度編集モード
@@ -347,10 +424,13 @@ class DrawableLabel(QLabel):
                 self.editing_start_pos = pos
             else:
                 # 通常クリックは位置の移動
-                self.editing_waypoint.set_position(x, y)
+                editing_item.set_position(x, y)
                 if self.parent_viewer:
                     self.parent_viewer.update_display()
-                    self.parent_viewer.waypoint_edited.emit(self.editing_waypoint)
+                    if self.editing_waypoint:
+                        self.parent_viewer.waypoint_edited.emit(self.editing_waypoint)
+                    else:
+                        self.parent_viewer.landmark_edited.emit(self.editing_landmark)
         else:
             super().mousePressEvent(event)
 
@@ -400,31 +480,42 @@ class DrawableLabel(QLabel):
                     angle = np.arctan2(dy, dx)
                     self.temp_waypoint.set_angle(angle)
                     self.waypoint_updated.emit(self.temp_waypoint)
+            elif self.is_setting_angle and self.parent_viewer.drawing_mode == DrawingMode.LANDMARK:
+                if self.temp_landmark and self.click_pos:
+                    dx = pos.x() - self.click_pos.x()
+                    dy = -(pos.y() - self.click_pos.y())
+                    angle = np.arctan2(dy, dx)
+                    self.temp_landmark.set_angle(angle)
+                    self.landmark_updated.emit(self.temp_landmark)
             elif self.last_pos:
                 self.parent_viewer.draw_line(self.last_pos, pos)  # 線を描画
                 self.last_pos = pos
                 self.updateCursor()  # マウス移動時にカーソルを更新
-        elif self.edit_mode and self.editing_waypoint:
+        elif self.edit_mode and (self.editing_waypoint or self.editing_landmark):
             pos = event.position().toPoint()
             im_pos = self.parent_viewer.display_to_image_coords(pos)
             if im_pos is None:
                 return
             x = im_pos.x()
             y = im_pos.y()
+            editing_item = self.editing_waypoint or self.editing_landmark
 
             if self.is_editing_angle:
                 # 角度の計算
                 dx = pos.x() - self.editing_start_pos.x()
                 dy = -(pos.y() - self.editing_start_pos.y())  # Y軸を反転
                 angle = np.arctan2(dy, dx)
-                self.editing_waypoint.set_angle(angle)
+                editing_item.set_angle(angle)
             else:
                 # 位置の更新
-                self.editing_waypoint.set_position(x, y)
+                editing_item.set_position(x, y)
 
             if self.parent_viewer:
                 self.parent_viewer.update_display()
-                self.parent_viewer.waypoint_edited.emit(self.editing_waypoint)
+                if self.editing_waypoint:
+                    self.parent_viewer.waypoint_edited.emit(self.editing_waypoint)
+                else:
+                    self.parent_viewer.landmark_edited.emit(self.editing_landmark)
         else:
             super().mouseMoveEvent(event)
 
@@ -439,15 +530,23 @@ class DrawableLabel(QLabel):
                     final_angle = np.arctan2(dy, dx)
                     self.temp_waypoint.set_angle(final_angle)
                     self.waypoint_updated.emit(self.temp_waypoint)
+                if self.temp_landmark:
+                    final_angle = np.arctan2(dy, dx)
+                    self.temp_landmark.set_angle(final_angle)
+                    self.landmark_updated.emit(self.temp_landmark)
                 self.is_setting_angle = False
                 self.click_pos = None
                 self.temp_waypoint = None
+                self.temp_landmark = None
             self.last_pos = None
-        elif self.edit_mode and self.editing_waypoint:
+        elif self.edit_mode and (self.editing_waypoint or self.editing_landmark):
             self.is_editing_angle = False
             if self.parent_viewer:
                 self.parent_viewer.update_display()
-                self.parent_viewer.waypoint_edited.emit(self.editing_waypoint)
+                if self.editing_waypoint:
+                    self.parent_viewer.waypoint_edited.emit(self.editing_waypoint)
+                else:
+                    self.parent_viewer.landmark_edited.emit(self.editing_landmark)
         else:
             super().mouseReleaseEvent(event)
 
@@ -528,6 +627,9 @@ class ImageViewer(QWidget):
     waypoint_added = Signal(Waypoint)  # ウェイポイント追加通知用のシグナル
     waypoint_removed = Signal(int)  # 削除シグナルを追加
     waypoint_edited = Signal(Waypoint)  # 編集完了シグナルを追加
+    landmark_added = Signal(Landmark)
+    landmark_removed = Signal(int)
+    landmark_edited = Signal(Landmark)
     history_changed = Signal(bool, bool)  # (can_undo, can_redo)
     
     def __init__(self):
@@ -572,6 +674,7 @@ class ImageViewer(QWidget):
         self.pgm_layer = Layer("PGM Layer")
         self.drawing_layer = Layer("Drawing Layer")
         self.waypoint_layer = Layer("Waypoint Layer")
+        self.landmark_layer = Layer("Landmark Layer")
         self.origin_layer = Layer("Origin Layer")
         self.path_layer = Layer("Path Layer")
         self.layers = [
@@ -579,7 +682,8 @@ class ImageViewer(QWidget):
             self.drawing_layer,   # 2. ペンと消しゴムの描画
             self.path_layer,      # 3. パス
             self.waypoint_layer,  # 4. ウェイポイント
-            self.origin_layer     # 5. 原点（最上層）
+            self.landmark_layer,  # 5. ランドマーク
+            self.origin_layer     # 6. 原点（最上層）
         ]
         self.active_layer = self.drawing_layer
         
@@ -587,11 +691,13 @@ class ImageViewer(QWidget):
             layer.changed.connect(self.on_layer_changed)
         
         self.waypoints = []
+        self.landmarks = []
         self.waypoint_size = 15
         self.show_grid = False
         self.grid_size = 50
         self.origin_point = None
         self.resolution = 0.05
+        self.current_map_yaml_path = None
 
         # 各コンポーネントの設定
         self.setup_display()
@@ -600,6 +706,7 @@ class ImageViewer(QWidget):
 
         # シグナルを接続
         self.pgm_display.waypoint_edited.connect(self.handle_waypoint_edited)
+        self.pgm_display.landmark_edited.connect(self.handle_landmark_edited)
         self.scroll_area.scale_changed.connect(self.handle_scale_change)
 
         # 履歴管理用の変数を追加
@@ -622,6 +729,8 @@ class ImageViewer(QWidget):
         self.pgm_display.setStyleSheet("background-color: white;")
         self.pgm_display.waypoint_clicked.connect(self.add_waypoint)
         self.pgm_display.waypoint_updated.connect(self.update_waypoint)
+        self.pgm_display.landmark_clicked.connect(self.add_landmark)
+        self.pgm_display.landmark_updated.connect(self.update_landmark)
         self.pgm_display.mouse_position_changed.connect(self.update_mouse_position)
 
         # ステータスメッセージ用のラベルを設定
@@ -726,10 +835,15 @@ class ImageViewer(QWidget):
         self.waypoint_button = QPushButton("ウェイポイント")
         self.waypoint_button.setCheckable(True)
         self.waypoint_button.clicked.connect(lambda: self.set_drawing_mode(DrawingMode.WAYPOINT))
+
+        self.landmark_button = QPushButton("ランドマーク")
+        self.landmark_button.setCheckable(True)
+        self.landmark_button.clicked.connect(lambda: self.set_drawing_mode(DrawingMode.LANDMARK))
         
         buttons_layout.addWidget(self.pen_button)
         buttons_layout.addWidget(self.eraser_button)
         buttons_layout.addWidget(self.waypoint_button)
+        buttons_layout.addWidget(self.landmark_button)
         
         # スライダーのレイアウト
         sliders_layout = QHBoxLayout()
@@ -783,6 +897,7 @@ class ImageViewer(QWidget):
             self.pen_button.setChecked(False)
             self.eraser_button.setChecked(False)
             self.waypoint_button.setChecked(False)
+            self.landmark_button.setChecked(False)
             self.pgm_display.set_drawing_mode(False)
             self.scroll_area.set_drawing_mode(False)
             return
@@ -792,6 +907,7 @@ class ImageViewer(QWidget):
         self.pen_button.setChecked(mode == DrawingMode.PEN)
         self.eraser_button.setChecked(mode == DrawingMode.ERASER)
         self.waypoint_button.setChecked(mode == DrawingMode.WAYPOINT)
+        self.landmark_button.setChecked(mode == DrawingMode.LANDMARK)
         
         # ラベルの描画モードを設定
         self.pgm_display.set_drawing_mode(mode != DrawingMode.NONE)
@@ -799,7 +915,7 @@ class ImageViewer(QWidget):
         self.scroll_area.set_drawing_mode(mode != DrawingMode.NONE)
         # カーソルを更新
         if (mode != DrawingMode.NONE):
-            if (mode == DrawingMode.WAYPOINT):
+            if mode in (DrawingMode.WAYPOINT, DrawingMode.LANDMARK):
                 self.pgm_display.setCursor(Qt.CursorShape.CrossCursor)
             else:
                 self.pgm_display.updateCursor()
@@ -955,6 +1071,42 @@ class ImageViewer(QWidget):
         # 対応するラベルを更新するためにシグナルを再発行
         self.waypoint_added.emit(waypoint)
 
+    def add_landmark(self, pos):
+        """ランドマークを追加"""
+        if not self.pgm_layer.pixmap:
+            return
+
+        im_pos = self.display_to_image_coords(pos)
+        if im_pos is None:
+            return
+
+        landmark = Landmark(im_pos.x(), im_pos.y())
+        if self.origin_point:
+            origin_x, origin_y = self.origin_point
+            landmark.update_metric_coordinates(origin_x, origin_y, self.resolution)
+
+        self.landmarks.append(landmark)
+        self.pgm_display.temp_landmark = landmark
+
+        if not self.landmark_layer.pixmap:
+            self.landmark_layer.pixmap = QPixmap(self.pgm_layer.pixmap.size())
+            self.landmark_layer.pixmap.fill(Qt.GlobalColor.transparent)
+
+        self.landmark_added.emit(landmark)
+        self.update_display()
+        self.add_to_history({
+            'type': 'landmark_add',
+            'landmark': landmark
+        })
+
+    def update_landmark(self, landmark):
+        """ランドマークの更新（角度変更時）"""
+        if self.origin_point:
+            origin_x, origin_y = self.origin_point
+            landmark.update_metric_coordinates(origin_x, origin_y, self.resolution)
+        self.update_display()
+        self.landmark_edited.emit(landmark)
+
     def update_display(self):
         """複数レイヤーを合成して表示"""
         if not self.pgm_layer.pixmap:
@@ -1080,7 +1232,46 @@ class ImageViewer(QWidget):
                 )
                 waypoint.hover_rect = hover_rect  # 後でホバー判定に使用
 
-        # 6. 原点レイヤーを描画（最上層）
+        # 6. ランドマークレイヤーを描画
+        if self.landmarks and self.landmark_layer.visible:
+            painter.setOpacity(self.landmark_layer.opacity)
+            painter.setRenderHint(QPainter.RenderHint.Antialiasing)
+            font = self.font()
+            font.setPointSize(10)
+            font.setBold(True)
+            painter.setFont(font)
+
+            for landmark in self.landmarks:
+                x, y = landmark.pixel_x, landmark.pixel_y
+                size = 9
+                is_editing = (self.pgm_display.edit_mode and
+                              self.pgm_display.editing_landmark and
+                              self.pgm_display.editing_landmark.number == landmark.number)
+                color = QColor(255, 152, 0, 255) if is_editing else QColor(46, 160, 67, 255)
+
+                pen = QPen(color)
+                pen.setWidth(3)
+                painter.setPen(pen)
+                end_x = x + int(size * 2.2 * np.cos(landmark.angle))
+                end_y = y - int(size * 2.2 * np.sin(landmark.angle))
+                painter.drawLine(x, y, end_x, end_y)
+
+                painter.setPen(QPen(QColor(255, 255, 255), 2))
+                painter.setBrush(color)
+                diamond = QPolygon([
+                    QPoint(x, y - size),
+                    QPoint(x + size, y),
+                    QPoint(x, y + size),
+                    QPoint(x - size, y),
+                ])
+                painter.drawPolygon(diamond)
+
+                painter.setPen(QColor(20, 20, 20, 230))
+                painter.drawText(x + size + 4, y - size - 2, landmark.name)
+
+                landmark.hover_rect = QRect(x - size, y - size, size * 2, size * 2)
+
+        # 7. 原点レイヤーを描画（最上層）
         if self.origin_layer.visible and self.origin_layer.pixmap:
             painter.setOpacity(self.origin_layer.opacity)
             painter.drawPixmap(0, 0, self.origin_layer.pixmap)
@@ -1189,6 +1380,28 @@ class ImageViewer(QWidget):
         self.waypoint_removed.emit(-1)  # 特別な値-1で全削除を通知
         self.update_display()
 
+    def remove_landmark(self, number, record_history=True):
+        """ランドマークを削除"""
+        target = next((lm for lm in self.landmarks if lm.number == number), None)
+        if not target:
+            return
+
+        self.landmarks = [lm for lm in self.landmarks if lm.number != number]
+        self.landmark_removed.emit(number)
+        self.update_display()
+        if record_history:
+            self.add_to_history({
+                'type': 'landmark_remove',
+                'landmark': target
+            })
+
+    def remove_all_landmarks(self):
+        """全てのランドマークを削除"""
+        self.landmarks.clear()
+        Landmark.reset_counter()
+        self.landmark_removed.emit(-1)
+        self.update_display()
+
     def reorder_waypoints(self, source_number, target_number):
         """ウェイポイントの順序を変更"""
         if not self.waypoints:
@@ -1263,6 +1476,8 @@ class ImageViewer(QWidget):
         try:
             with open(file_path, 'r') as f:
                 yaml_data = yaml.safe_load(f)
+
+            self.current_map_yaml_path = file_path
                 
             # YAMLファイルから直接originとresolutionを読み取る
             if 'origin' in yaml_data:
@@ -1299,6 +1514,9 @@ class ImageViewer(QWidget):
         for waypoint in self.waypoints:
             waypoint.update_metric_coordinates(origin_x, origin_y, self.resolution)
             self.waypoint_added.emit(waypoint)  # UIを更新
+        for landmark in self.landmarks:
+            landmark.update_metric_coordinates(origin_x, origin_y, self.resolution)
+            self.landmark_edited.emit(landmark)
 
     def draw_origin_point(self):
         """原点マーカーを描画"""
@@ -1400,6 +1618,14 @@ class ImageViewer(QWidget):
             'new_state': new_state
         })
 
+    def handle_landmark_edited(self, landmark):
+        """ランドマーク編集時の処理"""
+        if self.origin_point:
+            origin_x, origin_y = self.origin_point
+            landmark.update_metric_coordinates(origin_x, origin_y, self.resolution)
+        self.landmark_edited.emit(landmark)
+        self.update_display()
+
     def enter_edit_mode(self, waypoint):
         """ウェイポイントの編集モードに入る"""
         self.pgm_display.edit_mode = True
@@ -1482,6 +1708,62 @@ class ImageViewer(QWidget):
         
         self.update_display()
 
+    def export_landmarks_data(self):
+        """ランドマークをYAML/JSON向けの辞書に変換"""
+        data = {
+            'format_version': '1.0',
+            'landmarks': [
+                {
+                    'name': landmark.name,
+                    'x': round(float(landmark.x), 3),
+                    'y': round(float(landmark.y), 3),
+                    'yaw': round(float(landmark.angle), 3),
+                    'aliases': list(landmark.aliases),
+                }
+                for landmark in self.landmarks
+            ]
+        }
+        if self.current_map_yaml_path:
+            map_yaml = os.path.basename(self.current_map_yaml_path)
+            data['map'] = {
+                'name': os.path.splitext(map_yaml)[0],
+                'yaml': map_yaml,
+            }
+        return data
+
+    def import_landmarks_from_data(self, data):
+        """YAML/JSONデータからランドマークをインポート"""
+        if not data or 'landmarks' not in data:
+            return
+        if not self.origin_point:
+            QMessageBox.warning(self, "Origin Required", "先に地図YAMLを読み込んで原点を設定してください。")
+            return
+
+        self.landmarks.clear()
+        Landmark.reset_counter()
+        self.landmark_removed.emit(-1)
+        origin_x, origin_y = self.origin_point
+
+        for lm_data in data.get('landmarks', []):
+            try:
+                x_meters = float(lm_data['x']) * 20
+                y_meters = float(lm_data['y']) * 20
+                pixel_x = int(origin_x + x_meters)
+                pixel_y = int(origin_y - y_meters)
+                angle = float(lm_data.get('yaw', lm_data.get('angle_radians', 0.0)))
+                name = str(lm_data.get('name', '')).strip() or None
+
+                landmark = Landmark(pixel_x, pixel_y, angle, name)
+                landmark.aliases = list(lm_data.get('aliases', []))
+                landmark.update_metric_coordinates(origin_x, origin_y, self.resolution)
+                self.landmarks.append(landmark)
+                self.landmark_added.emit(landmark)
+            except (KeyError, TypeError, ValueError) as e:
+                print(f"Error importing landmark: {e}")
+                continue
+
+        self.update_display()
+
     def mouseMoveEvent(self, event):
         """マウス移動時のイベント処理"""
         # 既存のmouseMoveEventの処理を維持
@@ -1549,6 +1831,11 @@ class ImageViewer(QWidget):
             # ウェイポイントを復元
             self.waypoints.append(action['waypoint'])
             self.waypoint_added.emit(action['waypoint'])
+        elif action['type'] == 'landmark_add':
+            self.remove_landmark(action['landmark'].number, record_history=False)
+        elif action['type'] == 'landmark_remove':
+            self.landmarks.append(action['landmark'])
+            self.landmark_added.emit(action['landmark'])
         elif action['type'] == 'waypoint_edit':
             # 以前の状態に戻す
             waypoint = action['waypoint']
@@ -1580,6 +1867,11 @@ class ImageViewer(QWidget):
             self.waypoint_added.emit(action['waypoint'])
         elif action['type'] == 'waypoint_remove':
             self.remove_waypoint(action['waypoint'].number)
+        elif action['type'] == 'landmark_add':
+            self.landmarks.append(action['landmark'])
+            self.landmark_added.emit(action['landmark'])
+        elif action['type'] == 'landmark_remove':
+            self.remove_landmark(action['landmark'].number, record_history=False)
         elif action['type'] == 'waypoint_edit':
             # 新しい状態に進める
             waypoint = action['waypoint']
@@ -1847,14 +2139,28 @@ class RightPanel(QWidget):
     generate_path_requested = Signal()  # パス生成用シグナル
     export_requested = Signal(bool, bool)  # (export_pgm, export_waypoints)
     waypoint_import_requested = Signal(str)  # YAMLファイルパスを送信
+    landmark_delete_requested = Signal(int)
+    all_landmarks_delete_requested = Signal()
+    landmark_name_changed = Signal(int, str)
+    landmark_import_requested = Signal(str)
+    landmark_export_requested = Signal()
     
     def __init__(self):
         super().__init__()
-        self.setup_ui()
         self.waypoint_widgets = {}  # ウェイポイントウィジェットを保持する辞書を追加
+        self.landmark_widgets = {}
+        self.setup_ui()
 
     def setup_ui(self):
-        layout = QVBoxLayout()
+        outer_layout = QVBoxLayout()
+        outer_layout.setContentsMargins(0, 0, 0, 0)
+
+        scroll_area = QScrollArea()
+        scroll_area.setWidgetResizable(True)
+        scroll_area.setFrameShape(QFrame.Shape.NoFrame)
+
+        content_widget = QWidget()
+        layout = QVBoxLayout(content_widget)
         layout.setSpacing(15)
         layout.setContentsMargins(10, 10, 10, 10)
         self.setStyleSheet("QWidget { background-color: #f5f5f5; border-radius: 5px; }")
@@ -1866,6 +2172,10 @@ class RightPanel(QWidget):
         # ウェイポイントリストパネルを追加
         self.waypoint_widget = self.create_waypoint_panel()
         layout.addWidget(self.waypoint_widget)
+
+        # ランドマークリストパネルを追加
+        self.landmark_widget = self.create_landmark_panel()
+        layout.addWidget(self.landmark_widget)
         
         # Format Editor (旧Panel 2)を追加
         self.format_editor = FormatEditorPanel()
@@ -1875,7 +2185,9 @@ class RightPanel(QWidget):
         self.export_widget = self.create_export_panel()
         layout.addWidget(self.export_widget)
 
-        self.setLayout(layout)
+        scroll_area.setWidget(content_widget)
+        outer_layout.addWidget(scroll_area)
+        self.setLayout(outer_layout)
 
     def create_layer_panel(self):
         """レイヤーパネルを作成"""
@@ -2048,6 +2360,84 @@ class RightPanel(QWidget):
         
         return widget
 
+    def create_landmark_panel(self):
+        """ランドマークリストパネルを作成"""
+        widget = QWidget()
+        layout = QVBoxLayout(widget)
+        layout.setSpacing(5)
+
+        header_layout = QHBoxLayout()
+        title_label = QLabel("Landmarks")
+        title_label.setStyleSheet("""
+            QLabel {
+                font-size: 14px;
+                font-weight: bold;
+                padding: 5px;
+                background-color: #e0e0e0;
+                border-radius: 3px;
+            }
+        """)
+
+        import_button = QPushButton("Import")
+        import_button.setToolTip("Import Landmarks YAML/JSON")
+        import_button.clicked.connect(self.handle_import_landmarks)
+
+        export_button = QPushButton("Export")
+        export_button.setToolTip("Export Landmarks YAML/JSON")
+        export_button.clicked.connect(self.landmark_export_requested.emit)
+
+        clear_button = QPushButton("×")
+        clear_button.setFixedSize(20, 20)
+        clear_button.setToolTip("すべてのランドマークを削除")
+        clear_button.setStyleSheet("""
+            QPushButton {
+                background-color: #ff9800;
+                color: white;
+                border-radius: 10px;
+                font-weight: bold;
+                font-size: 12px;
+            }
+            QPushButton:hover {
+                background-color: #f57c00;
+            }
+        """)
+        clear_button.clicked.connect(self.all_landmarks_delete_requested.emit)
+
+        header_layout.addWidget(title_label)
+        header_layout.addWidget(import_button)
+        header_layout.addWidget(export_button)
+        header_layout.addStretch()
+        header_layout.addWidget(clear_button)
+
+        self.landmark_scroll_area = QScrollArea()
+        self.landmark_scroll_area.setWidgetResizable(True)
+        self.landmark_scroll_area.setStyleSheet("""
+            QScrollArea {
+                background-color: white;
+                border: 1px solid #ccc;
+                border-radius: 3px;
+            }
+        """)
+
+        self.landmark_list = QWidget()
+        self.landmark_list.setStyleSheet("""
+            QWidget {
+                background-color: white;
+                padding: 5px;
+            }
+        """)
+        self.landmark_list_layout = QVBoxLayout(self.landmark_list)
+        self.landmark_list_layout.setSpacing(2)
+        self.landmark_list_layout.setAlignment(Qt.AlignmentFlag.AlignTop)
+        self.landmark_scroll_area.setWidget(self.landmark_list)
+        self.landmark_scroll_area.setMinimumHeight(120)
+        self.landmark_scroll_area.setMaximumHeight(220)
+
+        layout.addLayout(header_layout)
+        layout.addWidget(self.landmark_scroll_area)
+
+        return widget
+
     def create_export_panel(self):
         """エクスポートパネルを作成"""
         widget = QWidget()
@@ -2080,6 +2470,7 @@ class RightPanel(QWidget):
         # チェックボックス
         self.export_pgm_cb = QCheckBox("Export PGM with drawings")
         self.export_waypoints_cb = QCheckBox("Export Waypoints YAML")
+        self.export_landmarks_cb = QCheckBox("Export Landmarks YAML")
         
         # ボタンのレイアウト
         button_layout = QHBoxLayout()
@@ -2104,6 +2495,7 @@ class RightPanel(QWidget):
         # レイアウトに追加（インポートボタン関連の行を削除）
         content_layout.addWidget(self.export_pgm_cb)
         content_layout.addWidget(self.export_waypoints_cb)
+        content_layout.addWidget(self.export_landmarks_cb)
         button_layout.addWidget(export_button)
         content_layout.addLayout(button_layout)
         
@@ -2123,12 +2515,26 @@ class RightPanel(QWidget):
         if file_name:
             self.waypoint_import_requested.emit(file_name)
 
+    def handle_import_landmarks(self):
+        """Landmarkのインポート処理"""
+        file_name, _ = QFileDialog.getOpenFileName(
+            self,
+            "Import Landmarks",
+            "",
+            "Landmark Files (*.yaml *.yml *.json);;YAML Files (*.yaml *.yml);;JSON Files (*.json);;All Files (*)"
+        )
+        if file_name:
+            self.landmark_import_requested.emit(file_name)
+
     def handle_export(self):
         """エクスポートボタンクリック時の処理"""
         export_pgm = self.export_pgm_cb.isChecked()
         export_waypoints = self.export_waypoints_cb.isChecked()
+        export_landmarks = self.export_landmarks_cb.isChecked()
         if export_pgm or export_waypoints:
             self.export_requested.emit(export_pgm, export_waypoints)
+        if export_landmarks:
+            self.landmark_export_requested.emit()
 
     # スクロールタイマーの設定用メソッドを追加
     def start_auto_scroll(self):
@@ -2212,6 +2618,18 @@ class RightPanel(QWidget):
         waypoint_item.delete_clicked.connect(self.waypoint_delete_requested.emit)
         self.waypoint_list_layout.addWidget(waypoint_item)
 
+    def add_landmark_to_list(self, landmark):
+        """ランドマークリストにランドマークを追加または更新"""
+        if landmark.number in self.landmark_widgets:
+            self.landmark_widgets[landmark.number].update_landmark(landmark)
+            return
+
+        landmark_item = LandmarkListItem(landmark)
+        self.landmark_widgets[landmark.number] = landmark_item
+        landmark_item.delete_clicked.connect(self.landmark_delete_requested.emit)
+        landmark_item.name_changed.connect(self.landmark_name_changed.emit)
+        self.landmark_list_layout.addWidget(landmark_item)
+
     def remove_waypoint_from_list(self, number):
         """ウェイポイントをリストから削除"""
         if number == -1:  # 全削除の場合
@@ -2237,6 +2655,25 @@ class RightPanel(QWidget):
             if widget := item.widget():
                 widget.deleteLater()
         self.waypoint_widgets.clear()
+
+    def remove_landmark_from_list(self, number):
+        """ランドマークをリストから削除"""
+        if number == -1:
+            self.clear_landmark_list()
+            return
+
+        if number in self.landmark_widgets:
+            widget = self.landmark_widgets.pop(number)
+            self.landmark_list_layout.removeWidget(widget)
+            widget.deleteLater()
+
+    def clear_landmark_list(self):
+        """ランドマークリストをクリア"""
+        while self.landmark_list_layout.count():
+            item = self.landmark_list_layout.takeAt(0)
+            if widget := item.widget():
+                widget.deleteLater()
+        self.landmark_widgets.clear()
 
     def update_layer_list(self, layers):
         """レイヤーリストを更新"""
@@ -2525,6 +2962,93 @@ class WaypointListItem(QWidget):
         """)
         event.accept()
 
+class LandmarkListItem(QWidget):
+    """ランドマークリストの各アイテム用ウィジェット"""
+    delete_clicked = Signal(int)
+    name_changed = Signal(int, str)
+
+    def __init__(self, landmark):
+        super().__init__()
+        self.landmark_number = landmark.number
+        self.landmark = landmark
+
+        layout = QHBoxLayout(self)
+        layout.setContentsMargins(4, 4, 4, 4)
+        layout.setSpacing(8)
+
+        self.frame = QFrame()
+        self.frame.setFrameStyle(QFrame.Shape.StyledPanel)
+        self.frame.setStyleSheet("""
+            QFrame {
+                background-color: white;
+                border: 1px solid #e0e0e0;
+                border-radius: 4px;
+            }
+        """)
+
+        frame_layout = QHBoxLayout(self.frame)
+        frame_layout.setContentsMargins(8, 4, 8, 4)
+        frame_layout.setSpacing(8)
+
+        number_badge = QLabel(f"{landmark.number:02d}")
+        number_badge.setStyleSheet("""
+            QLabel {
+                color: white;
+                background-color: #2ea043;
+                border-radius: 3px;
+                padding: 2px 6px;
+                font-size: 11px;
+                font-weight: bold;
+            }
+        """)
+        number_badge.setFixedWidth(40)
+
+        self.name_edit = QLineEdit(landmark.name)
+        self.name_edit.setMinimumWidth(90)
+        self.name_edit.editingFinished.connect(self.emit_name_changed)
+
+        self.coord_label = QLabel()
+        self.coord_label.setStyleSheet("color: #424242; font-size: 11px;")
+
+        delete_button = QPushButton("×")
+        delete_button.setFixedSize(20, 20)
+        delete_button.setStyleSheet("""
+            QPushButton {
+                background-color: transparent;
+                color: #666666;
+                border: none;
+                border-radius: 10px;
+                font-weight: bold;
+                font-size: 14px;
+            }
+            QPushButton:hover {
+                background-color: #ff5252;
+                color: white;
+            }
+        """)
+        delete_button.clicked.connect(lambda: self.delete_clicked.emit(self.landmark_number))
+
+        frame_layout.addWidget(number_badge)
+        frame_layout.addWidget(self.name_edit, 1)
+        frame_layout.addWidget(self.coord_label)
+        frame_layout.addWidget(delete_button)
+        layout.addWidget(self.frame)
+
+        self.update_landmark(landmark)
+
+    def update_landmark(self, landmark):
+        self.landmark = landmark
+        self.landmark_number = landmark.number
+        if self.name_edit.text() != landmark.name:
+            self.name_edit.blockSignals(True)
+            self.name_edit.setText(landmark.name)
+            self.name_edit.blockSignals(False)
+        degrees = int(landmark.angle * 180 / np.pi)
+        self.coord_label.setText(f"({landmark.x:.2f}, {landmark.y:.2f}) {degrees}°")
+
+    def emit_name_changed(self):
+        self.name_changed.emit(self.landmark_number, self.name_edit.text())
+
 class MainWindow(QMainWindow):
     """メインウィンドウ
     アプリケーションの主要なUIと機能を統合"""
@@ -2622,6 +3146,35 @@ class MainWindow(QMainWindow):
 
         # インポート時の処理を接続
         self.right_panel.waypoint_import_requested.connect(self.import_waypoints_yaml)
+
+        # ランドマーク関連の処理を接続
+        self.image_viewer.landmark_added.connect(self.right_panel.add_landmark_to_list)
+        self.image_viewer.landmark_edited.connect(self.right_panel.add_landmark_to_list)
+        self.image_viewer.landmark_removed.connect(self.right_panel.remove_landmark_from_list)
+        self.right_panel.landmark_delete_requested.connect(self.image_viewer.remove_landmark)
+        self.right_panel.all_landmarks_delete_requested.connect(self.image_viewer.remove_all_landmarks)
+        self.right_panel.landmark_name_changed.connect(self.handle_landmark_name_changed)
+        self.right_panel.landmark_import_requested.connect(self.import_landmarks_file)
+        self.right_panel.landmark_export_requested.connect(self.export_landmarks_file)
+
+    def keyPressEvent(self, event):
+        """F11で全画面切替、Escで全画面解除"""
+        if event.key() == Qt.Key.Key_F11:
+            self.toggle_fullscreen()
+            event.accept()
+            return
+        if event.key() == Qt.Key.Key_Escape and self.isFullScreen():
+            self.showNormal()
+            event.accept()
+            return
+        super().keyPressEvent(event)
+
+    def toggle_fullscreen(self):
+        """全画面表示を切り替え"""
+        if self.isFullScreen():
+            self.showNormal()
+        else:
+            self.showFullScreen()
 
     def update_layer_panel(self):
         """レイヤーパネルの表示を更新"""
@@ -2856,6 +3409,50 @@ class MainWindow(QMainWindow):
             
         except Exception as e:
             QMessageBox.critical(self, "Error", f"Error importing waypoints: {str(e)}")
+
+    def handle_landmark_name_changed(self, number, name):
+        """右パネルでランドマーク名が変更されたときの処理"""
+        landmark = next((lm for lm in self.image_viewer.landmarks if lm.number == number), None)
+        if not landmark:
+            return
+        landmark.set_name(name)
+        self.image_viewer.landmark_edited.emit(landmark)
+        self.image_viewer.update_display()
+
+    def export_landmarks_file(self):
+        """ランドマークをYAML/JSONとしてエクスポート"""
+        file_name, _ = QFileDialog.getSaveFileName(
+            self,
+            "Export Landmarks",
+            "",
+            "YAML Files (*.yaml *.yml);;JSON Files (*.json);;All Files (*)"
+        )
+        if not file_name:
+            return
+        if not os.path.splitext(file_name)[1]:
+            file_name += ".yaml"
+
+        data = self.image_viewer.export_landmarks_data()
+        try:
+            with open(file_name, 'w') as f:
+                if file_name.lower().endswith('.json'):
+                    json.dump(data, f, ensure_ascii=False, indent=2)
+                else:
+                    yaml.safe_dump(data, f, allow_unicode=True, sort_keys=False)
+        except Exception as e:
+            QMessageBox.critical(self, "Error", f"Failed to save landmarks: {str(e)}")
+
+    def import_landmarks_file(self, file_path):
+        """ランドマークをYAML/JSONからインポート"""
+        try:
+            with open(file_path, 'r') as f:
+                if file_path.lower().endswith('.json'):
+                    data = json.load(f)
+                else:
+                    data = yaml.safe_load(f)
+            self.image_viewer.import_landmarks_from_data(data)
+        except Exception as e:
+            QMessageBox.critical(self, "Error", f"Error importing landmarks: {str(e)}")
 
     def update_history_buttons(self, can_undo, can_redo):
         """戻る/進むボタンの状態を更新"""
