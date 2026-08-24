@@ -1,5 +1,15 @@
 from collections import OrderedDict
 
+# Waypointの追加属性とデフォルト値
+WAYPOINT_ATTRIBUTE_DEFAULTS = OrderedDict([
+    ('rotate', 0.0),
+    ('stop', False),
+    ('wait_time', 0.0),
+    ('change_map', ''),
+    ('threshold', -1.0),
+    ('person_area', False),
+])
+
 # Waypointのエクスポート/インポートフォーマット定義
 WAYPOINT_FORMAT = {
     'version': '1.0',
@@ -8,9 +18,12 @@ WAYPOINT_FORMAT = {
         'x': 'float',         # X座標 (メートル)
         'y': 'float',         # Y座標 (メートル) 
         'angle_radians': 'float',  # 角度 (ラジアン)
-        'stop': 'bool',        # 停止フラグ
-        'wait_time': 'float',  # 待機時間 (秒)
-        'change_map': 'string'  # マップ変更フラグ
+        'rotate': 'float',      # 到着後の追加回転量
+        'stop': 'bool',         # 停止フラグ
+        'wait_time': 'float',   # 待機時間 (秒)
+        'change_map': 'string', # 切り替え先の地図名
+        'threshold': 'float',   # 個別の到着判定距離
+        'person_area': 'bool'   # 人物探索エリア
     }
 }
 

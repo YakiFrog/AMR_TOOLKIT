@@ -1,5 +1,5 @@
 from PySide6.QtWidgets import QDialog, QVBoxLayout, QWidget, QScrollArea, QHBoxLayout, QPushButton, QLabel, QLineEdit
-from ...utils.format_manager import format_manager
+from ...utils.format_manager import WAYPOINT_ATTRIBUTE_DEFAULTS, format_manager
 
 class AttributeDialog(QDialog):
     def __init__(self, waypoint, format_data, parent=None):
@@ -33,7 +33,10 @@ class AttributeDialog(QDialog):
         
         # 既存の属性を表示
         for key in available_attrs:
-            self.add_attribute_row(key, self.waypoint.get_attribute(key, ""))
+            default_value = WAYPOINT_ATTRIBUTE_DEFAULTS.get(key, "")
+            self.add_attribute_row(
+                key, self.waypoint.get_attribute(key, default_value)
+            )
         
         scroll = QScrollArea()
         scroll.setWidget(self.attribute_list)
@@ -74,9 +77,13 @@ class AttributeDialog(QDialog):
             layout_item = self.attribute_layout.itemAt(i)
             if layout_item and isinstance(layout_item, QHBoxLayout):
                 value_edit = layout_item.itemAt(1).widget()
-                if value_edit and value_edit.text():  # 空でない値のみ保存
+                if value_edit:
                     key = value_edit.property('key')
-                    attributes[key] = value_edit.text()
+                    text = value_edit.text()
+                    if text or key in WAYPOINT_ATTRIBUTE_DEFAULTS:
+                        attributes[key] = (
+                            text if text else WAYPOINT_ATTRIBUTE_DEFAULTS[key]
+                        )
         return attributes
 
     def accept(self):

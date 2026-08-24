@@ -1,6 +1,8 @@
 import numpy as np
 from enum import Enum
 
+from ..utils.format_manager import WAYPOINT_ATTRIBUTE_DEFAULTS
+
 class DrawingMode(Enum):
     """描画モードを定義"""
     NONE = 0
@@ -29,7 +31,7 @@ class Waypoint:
         self.name = name if name else f"Waypoint {self.number}"
         self.resolution = 0.05  # 解像度を保存
         self.update_display_name()
-        self.attributes = {}  # 属性を保存するディクショナリを追加
+        self.attributes = dict(WAYPOINT_ATTRIBUTE_DEFAULTS)
 
     def set_angle(self, angle):
         """角度を設定し、表示名を更新"""

@@ -4,4 +4,9 @@ format:
   x: float
   y: float
   angle_radians: float
-  rotate: int
+  rotate: float
+  stop: bool
+  wait_time: float
+  change_map: string
+  threshold: float
+  person_area: bool

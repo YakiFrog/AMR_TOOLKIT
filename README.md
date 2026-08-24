@@ -145,20 +145,25 @@ pyinstaller WaypointEditor.spec --clean --noconfirm
 format_version: '1.0'
 waypoints:
   - number: 1
-    name: "Waypoint 1"
-    x: 2.350          # 実世界 X 座標 [m]
-    y: -1.120         # 実世界 Y 座標 [m]
-    angle_degrees: 45.0
-    angle_radians: 0.7854
-    attributes:       # カスタム属性（設定した場合）
-      action: "stop"
-      duration: 5.0
+    x: 2.350
+    y: -1.120
+    angle_radians: 0.785
+    rotate: 0.0
+    stop: false
+    wait_time: 0.0
+    change_map: ''
+    threshold: -1.0
+    person_area: false
   - number: 2
-    name: "Waypoint 2"
     x: 5.400
     y: 3.210
-    angle_degrees: 90.0
-    angle_radians: 1.5708
+    angle_radians: 1.571
+    rotate: 0.0
+    stop: false
+    wait_time: 0.0
+    change_map: ''
+    threshold: -1.0
+    person_area: true
 ```
 
 ---

@@ -11,7 +11,7 @@ from PySide6.QtCore import Qt
 from PySide6.QtGui import QImage, QPixmap
 
 from ..core.constants import COMMON_STYLES
-from ..utils.format_manager import format_manager
+from ..utils.format_manager import WAYPOINT_ATTRIBUTE_DEFAULTS, format_manager
 from .panels.menu_panel import MenuPanel
 from .panels.map_panel import ImageViewer
 from .panels.right_panel import RightPanel
@@ -297,10 +297,13 @@ class MainWindow(QMainWindow):
         elif key == 'y': return round(float(waypoint.y), 3)
         elif key == 'angle_radians': return round(float(waypoint.angle), 3) 
         else:
-            value = waypoint.get_attribute(key, None)
+            default_value = WAYPOINT_ATTRIBUTE_DEFAULTS.get(key, None)
+            value = waypoint.get_attribute(key, default_value)
             if value is not None:
                 converted = self.convert_value(value, type_info)
-                if (type_info in ('str', 'string')) and converted == '': return None
+                if ((type_info in ('str', 'string')) and converted == '' and
+                        key not in WAYPOINT_ATTRIBUTE_DEFAULTS):
+                    return None
                 return converted
         return None
 

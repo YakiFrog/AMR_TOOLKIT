@@ -30,6 +30,16 @@ WAYPOINT_SETTINGS = {
     'EDIT_SIZE_MULT': 1.15,     # 編集時のサイズ倍率（わずかに縮小）
 }
 
+# Waypointの追加属性とデフォルト値
+WAYPOINT_ATTRIBUTE_DEFAULTS = OrderedDict([
+    ('rotate', 0.0),
+    ('stop', False),
+    ('wait_time', 0.0),
+    ('change_map', ''),
+    ('threshold', -1.0),
+    ('person_area', False),
+])
+
 # Waypointのエクスポート/インポートフォーマット定義
 WAYPOINT_FORMAT = {
     'version': '1.0',
@@ -38,8 +48,12 @@ WAYPOINT_FORMAT = {
         'x': 'float',         # X座標 (メートル)
         'y': 'float',         # Y座標 (メートル) 
         'angle_radians': 'float',  # 角度 (ラジアン)
-        'stop': 'bool',        # 停止フラグ
-        'change_map': 'string'  # マップ変更フラグ
+        'rotate': 'float',      # 到着後の追加回転量
+        'stop': 'bool',         # 停止フラグ
+        'wait_time': 'float',   # 待機時間 (秒)
+        'change_map': 'string', # 切り替え先の地図名
+        'threshold': 'float',   # 個別の到着判定距離
+        'person_area': 'bool'   # 人物探索エリア
     }
 }
 
@@ -90,7 +104,7 @@ class Waypoint:
         self.name = name if name else f"Waypoint {self.number}"
         self.resolution = 0.05  # 解像度を保存
         self.update_display_name()
-        self.attributes = {}  # 属性を保存するディクショナリを追加
+        self.attributes = dict(WAYPOINT_ATTRIBUTE_DEFAULTS)
 
     def set_angle(self, angle):
         """角度を設定し、表示名を更新"""
@@ -3470,12 +3484,14 @@ class MainWindow(QMainWindow):
             return round(float(waypoint.angle), 3) 
         else:
             # カスタム属性の場合
-            value = waypoint.get_attribute(key, None)
+            default_value = WAYPOINT_ATTRIBUTE_DEFAULTS.get(key, None)
+            value = waypoint.get_attribute(key, default_value)
             if value is not None:
                 converted = self.convert_value(value, type_info)
                 # 文字列が空の場合は出力しない（None返す）
                 # boolはtrue/false両方出力する
-                if (type_info == 'string' or type_info == 'str') and converted == '':
+                if ((type_info == 'string' or type_info == 'str') and
+                        converted == '' and key not in WAYPOINT_ATTRIBUTE_DEFAULTS):
                     return None
                 return converted
         return None
@@ -3798,7 +3814,10 @@ class AttributeDialog(QDialog):
         
         # 既存の属性を表示
         for key in available_attrs:
-            self.add_attribute_row(key, self.waypoint.get_attribute(key, ""))
+            default_value = WAYPOINT_ATTRIBUTE_DEFAULTS.get(key, "")
+            self.add_attribute_row(
+                key, self.waypoint.get_attribute(key, default_value)
+            )
         
         scroll = QScrollArea()
         scroll.setWidget(self.attribute_list)
@@ -3838,9 +3857,13 @@ class AttributeDialog(QDialog):
             layout_item = self.attribute_layout.itemAt(i)
             if layout_item and isinstance(layout_item, QHBoxLayout):
                 value_edit = layout_item.itemAt(1).widget()
-                if value_edit and value_edit.text():  # 空でない値のみ保存
+                if value_edit:
                     key = value_edit.property('key')
-                    attributes[key] = value_edit.text()
+                    text = value_edit.text()
+                    if text or key in WAYPOINT_ATTRIBUTE_DEFAULTS:
+                        attributes[key] = (
+                            text if text else WAYPOINT_ATTRIBUTE_DEFAULTS[key]
+                        )
         return attributes
 
     def accept(self):
