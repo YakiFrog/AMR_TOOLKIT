@@ -301,6 +301,10 @@ class MainWindow(QMainWindow):
             value = waypoint.get_attribute(key, default_value)
             if value is not None:
                 converted = self.convert_value(value, type_info)
+                # デフォルト値のアクションは未設定としてYAMLから省略する
+                if (key in WAYPOINT_ATTRIBUTE_DEFAULTS and
+                        converted == WAYPOINT_ATTRIBUTE_DEFAULTS[key]):
+                    return None
                 if ((type_info in ('str', 'string')) and converted == '' and
                         key not in WAYPOINT_ATTRIBUTE_DEFAULTS):
                     return None

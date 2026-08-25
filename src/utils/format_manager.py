@@ -10,6 +10,38 @@ WAYPOINT_ATTRIBUTE_DEFAULTS = OrderedDict([
     ('person_area', False),
 ])
 
+
+def count_configured_waypoint_actions(attributes):
+    """Count attributes whose values differ from the action defaults."""
+    configured = 0
+    for key, value in attributes.items():
+        if key not in WAYPOINT_ATTRIBUTE_DEFAULTS:
+            if value is not None and value != '':
+                configured += 1
+            continue
+
+        default = WAYPOINT_ATTRIBUTE_DEFAULTS[key]
+        try:
+            if isinstance(default, bool):
+                normalized = (
+                    value.lower() in ('true', '1', 'yes', 'on')
+                    if isinstance(value, str)
+                    else bool(value)
+                )
+            elif isinstance(default, float):
+                normalized = float(value)
+            elif isinstance(default, int):
+                normalized = int(value)
+            else:
+                normalized = str(value)
+        except (TypeError, ValueError):
+            normalized = value
+
+        if normalized != default:
+            configured += 1
+
+    return configured
+
 # Waypointのエクスポート/インポートフォーマット定義
 WAYPOINT_FORMAT = {
     'version': '1.0',

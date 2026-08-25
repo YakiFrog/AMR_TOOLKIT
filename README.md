@@ -148,23 +148,14 @@ waypoints:
     x: 2.350
     y: -1.120
     angle_radians: 0.785
-    rotate: 0.0
-    stop: false
-    wait_time: 0.0
-    change_map: ''
-    threshold: -1.0
-    person_area: false
   - number: 2
     x: 5.400
     y: 3.210
     angle_radians: 1.571
-    rotate: 0.0
-    stop: false
-    wait_time: 0.0
-    change_map: ''
-    threshold: -1.0
     person_area: true
 ```
+
+アクション項目は、デフォルト値から変更されたものだけがウェイポイントごとに出力されます。
 
 ---
 

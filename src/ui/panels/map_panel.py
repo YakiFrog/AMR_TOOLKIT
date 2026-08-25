@@ -11,7 +11,7 @@ from PySide6.QtGui import (QPixmap, QImage, QWheelEvent, QPainter, QPen, QCursor
 from ...core.models import DrawingMode, Waypoint, Landmark
 from ...core.constants import (WAYPOINT_SETTINGS, MIN_SCALE, MAX_SCALE, 
                                DEFAULT_SCALE, SCALE_SENSITIVITY)
-from ...utils.format_manager import format_manager
+from ...utils.format_manager import count_configured_waypoint_actions, format_manager
 from ..widgets.layer_widget import Layer
 from ..dialogs.attribute_dialog import AttributeDialog
 
@@ -1072,7 +1072,7 @@ class ImageViewer(QWidget):
                     text_x = x - text_width // 2
                     text_y = y + text_height // 3
                     painter.drawText(text_x, text_y, number_text)
-                    num_attributes = len(waypoint.attributes)
+                    num_attributes = count_configured_waypoint_actions(waypoint.attributes)
                     if (num_attributes > 0):
                         painter.setPen(QColor(255, 255, 255))
                         font.setPointSize(WAYPOINT_SETTINGS['FONT_SIZE_ATTR_MULT'] * WAYPOINT_SETTINGS['BASE_SIZE'])

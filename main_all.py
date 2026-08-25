@@ -40,6 +40,38 @@ WAYPOINT_ATTRIBUTE_DEFAULTS = OrderedDict([
     ('person_area', False),
 ])
 
+
+def count_configured_waypoint_actions(attributes):
+    """Count attributes whose values differ from the action defaults."""
+    configured = 0
+    for key, value in attributes.items():
+        if key not in WAYPOINT_ATTRIBUTE_DEFAULTS:
+            if value is not None and value != '':
+                configured += 1
+            continue
+
+        default = WAYPOINT_ATTRIBUTE_DEFAULTS[key]
+        try:
+            if isinstance(default, bool):
+                normalized = (
+                    value.lower() in ('true', '1', 'yes', 'on')
+                    if isinstance(value, str)
+                    else bool(value)
+                )
+            elif isinstance(default, float):
+                normalized = float(value)
+            elif isinstance(default, int):
+                normalized = int(value)
+            else:
+                normalized = str(value)
+        except (TypeError, ValueError):
+            normalized = value
+
+        if normalized != default:
+            configured += 1
+
+    return configured
+
 # Waypointのエクスポート/インポートフォーマット定義
 WAYPOINT_FORMAT = {
     'version': '1.0',
@@ -1222,7 +1254,7 @@ class ImageViewer(QWidget):
                 painter.drawText(text_x, text_y, number_text)
 
                 # 属性の数を描画（右上に小さく表示）
-                num_attributes = len(waypoint.attributes)
+                num_attributes = count_configured_waypoint_actions(waypoint.attributes)
                 if (num_attributes > 0):
                     painter.setPen(QColor(255, 255, 255))
                     font.setPointSize(WAYPOINT_SETTINGS['FONT_SIZE_ATTR_MULT'] * WAYPOINT_SETTINGS['BASE_SIZE'])
@@ -3488,6 +3520,10 @@ class MainWindow(QMainWindow):
             value = waypoint.get_attribute(key, default_value)
             if value is not None:
                 converted = self.convert_value(value, type_info)
+                # デフォルト値のアクションは未設定としてYAMLから省略する
+                if (key in WAYPOINT_ATTRIBUTE_DEFAULTS and
+                        converted == WAYPOINT_ATTRIBUTE_DEFAULTS[key]):
+                    return None
                 # 文字列が空の場合は出力しない（None返す）
                 # boolはtrue/false両方出力する
                 if ((type_info == 'string' or type_info == 'str') and
