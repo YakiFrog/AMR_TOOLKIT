@@ -3918,9 +3918,27 @@ class FormatEditorPanel(QFrame):
         layout.setSpacing(5)
         layout.setContentsMargins(10, 10, 10, 10)  # マージンを追加
         
-        # タイトル
+        # タイトル行（Format Editor + パラメータ解説ボタン）
+        title_row = QHBoxLayout()
         title_label = QLabel("Format Editor")
-        
+        self.help_button = QPushButton("パラメータ解説")
+        self.help_button.setCheckable(True)
+        self.help_button.setStyleSheet("""
+            QPushButton {
+                background-color: #607D8B;
+                color: white;
+                padding: 4px 10px;
+                border-radius: 3px;
+                min-width: 110px;
+            }
+            QPushButton:hover { background-color: #546E7A; }
+            QPushButton:checked { background-color: #37474F; }
+        """)
+        self.help_button.toggled.connect(self.toggle_help)
+        title_row.addWidget(title_label)
+        title_row.addStretch()
+        title_row.addWidget(self.help_button)
+
         # コンテンツエリア
         content_widget = QWidget()
         content_widget.setObjectName("contentWidget")  # スタイルシートで参照するためのID
@@ -4012,11 +4030,10 @@ class FormatEditorPanel(QFrame):
         content_layout.addLayout(button_layout)
 
         # メインレイアウトに要素を追加
-        layout.addWidget(title_label)
+        layout.addLayout(title_row)
         layout.addWidget(content_widget)
 
-        # デフォルトパラメータの解説（読み取り専用）
-        help_label = QLabel("パラメータの意味（デフォルト）")
+        # デフォルトパラメータの解説（ボタンで開閉・既定は折りたたみ）
         self.help_box = QTextEdit()
         self.help_box.setReadOnly(True)
         self.help_box.setPlainText(WAYPOINT_PARAM_HELP)
@@ -4032,11 +4049,16 @@ class FormatEditorPanel(QFrame):
             }
         """)
         self.help_box.setVerticalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAsNeeded)
-        layout.addWidget(help_label)
+        self.help_box.setVisible(False)  # 既定は折りたたみ
         layout.addWidget(self.help_box)
 
         # 初期フォーマットを表示
         self.show_current_format()
+
+    def toggle_help(self, checked):
+        """パラメータ解説の表示/非表示を切り替える（既定は非表示）。"""
+        self.help_box.setVisible(bool(checked))
+        self.help_button.setText("パラメータ解説を閉じる" if checked else "パラメータ解説")
 
     def reset_to_default(self):
         """フォーマットをデフォルトに戻す"""
