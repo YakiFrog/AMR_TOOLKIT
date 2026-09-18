@@ -408,6 +408,8 @@ class DrawableLabel(QLabel):
         self.drag_start = None
         self.last_pos = None  # Add this line
         self.is_editing_angle = False
+        self._drag_offset = (0, 0)  # ドラッグ時に掴んだ位置との相対オフセット（滑らかな移動用）
+        self.setFocusPolicy(Qt.FocusPolicy.StrongFocus)  # 矢印キーでの微調整用
 
     def set_drawing_mode(self, enabled):
         self.drawing_enabled = enabled
@@ -472,6 +474,7 @@ class DrawableLabel(QLabel):
                     self.edit_mode = True
                     self.editing_waypoint = None
                     self.editing_landmark = landmark
+                    self.setFocus(Qt.FocusReason.MouseFocusReason)
                     self.setCursor(Qt.CursorShape.SizeAllCursor)
                     if self.parent_viewer:
                         self.parent_viewer.show_edit_message("ランドマーク: ドラッグで移動、Shift+ドラッグで角度を変更")
@@ -484,6 +487,7 @@ class DrawableLabel(QLabel):
                 if abs(waypoint.pixel_x - x) < hover_range and abs(waypoint.pixel_y - y) < hover_range:
                     self.edit_mode = True
                     self.editing_waypoint = waypoint
+                    self.setFocus(Qt.FocusReason.MouseFocusReason)
                     self.setCursor(Qt.CursorShape.SizeAllCursor)
                     # ステータスメッセージを表示
                     if self.parent_viewer:
@@ -523,8 +527,11 @@ class DrawableLabel(QLabel):
                 self.is_editing_angle = True
                 self.editing_start_pos = pos
             else:
-                # 通常クリックは位置の移動
-                editing_item.set_position(x, y)
+                # 通常クリックは位置の移動。掴んだ位置との相対オフセットを保持して
+                # カーソル位置へジャンプさせず、滑らかに追従させる。
+                self._drag_offset = (editing_item.pixel_x - x, editing_item.pixel_y - y)
+                self.parent_viewer._edit_dragging = True
+                editing_item.set_position(x + self._drag_offset[0], y + self._drag_offset[1])
                 if self.parent_viewer:
                     self.parent_viewer.update_display()
                     if self.editing_waypoint:
@@ -607,8 +614,8 @@ class DrawableLabel(QLabel):
                 angle = np.arctan2(dy, dx)
                 editing_item.set_angle(angle)
             else:
-                # 位置の更新
-                editing_item.set_position(x, y)
+                # 位置の更新（掴んだ相対オフセットを保持して滑らかに追従）
+                editing_item.set_position(x + self._drag_offset[0], y + self._drag_offset[1])
 
             if self.parent_viewer:
                 self.parent_viewer.update_display()
@@ -642,6 +649,7 @@ class DrawableLabel(QLabel):
         elif self.edit_mode and (self.editing_waypoint or self.editing_landmark):
             self.is_editing_angle = False
             if self.parent_viewer:
+                self.parent_viewer._edit_dragging = False
                 self.parent_viewer.update_display()
                 if self.editing_waypoint:
                     self.parent_viewer.waypoint_edited.emit(self.editing_waypoint)
@@ -649,6 +657,33 @@ class DrawableLabel(QLabel):
                     self.parent_viewer.landmark_edited.emit(self.editing_landmark)
         else:
             super().mouseReleaseEvent(event)
+
+    def keyPressEvent(self, event):
+        """編集モード中は矢印キーでWP/ランドマークを1pxずつ微調整（Shiftで10px）。"""
+        if self.edit_mode and (self.editing_waypoint or self.editing_landmark):
+            step = 10 if (event.modifiers() & Qt.KeyboardModifier.ShiftModifier) else 1
+            dx = dy = 0
+            key = event.key()
+            if key == Qt.Key.Key_Left:
+                dx = -step
+            elif key == Qt.Key.Key_Right:
+                dx = step
+            elif key == Qt.Key.Key_Up:
+                dy = -step  # 画像は下方向が+y
+            elif key == Qt.Key.Key_Down:
+                dy = step
+            if dx or dy:
+                item = self.editing_waypoint or self.editing_landmark
+                item.set_position(item.pixel_x + dx, item.pixel_y + dy)
+                if self.parent_viewer:
+                    self.parent_viewer.update_display()
+                    if self.editing_waypoint:
+                        self.parent_viewer.waypoint_edited.emit(self.editing_waypoint)
+                    else:
+                        self.parent_viewer.landmark_edited.emit(self.editing_landmark)
+                event.accept()
+                return
+        super().keyPressEvent(event)
 
     def contextMenuEvent(self, event):
         """右クリックメニューの表示"""
@@ -821,6 +856,7 @@ class ImageViewer(QWidget):
         
         # パフォーマンス最適化用の変数
         self._is_drawing_stroke = False  # ストローク描画中フラグ
+        self._edit_dragging = False      # WP/ランドマークのドラッグ中フラグ（ドラッグ中は高速描画）
         self._stroke_old_pixmap = None   # ストローク開始時のpixmap
         self._update_pending = False     # 更新待ちフラグ
         self._cached_result = None       # 合成結果キャッシュ
@@ -1402,7 +1438,7 @@ class ImageViewer(QWidget):
         # 画像サイズに応じて変換品質を切り替え（パフォーマンス最適化）
         # 巨大画像（2000x2000以上）や描画中はFastTransformationを使用
         use_fast = (result.width() > 2000 or result.height() > 2000 or 
-                    self._is_drawing_stroke or self.scale_factor < 0.5)
+                    self._is_drawing_stroke or self._edit_dragging or self.scale_factor < 0.5)
         transform_mode = (Qt.TransformationMode.FastTransformation if use_fast 
                          else Qt.TransformationMode.SmoothTransformation)
         
