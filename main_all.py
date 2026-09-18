@@ -114,7 +114,8 @@ WAYPOINT_FORMAT = {
         'wait_time': 'float',   # 待機時間 (秒)
         'change_map': 'string', # 切り替え先の地図名
         'threshold': 'float',   # 個別の到着判定距離
-        'person_area': 'bool'   # 人物探索エリア
+        'person_area': 'bool',  # 人物探索エリア
+        'manual': 'bool'        # 手動記録ステータス（get_pos_ent等で手動配置した場合のみtrue）
     }
 }
 
@@ -123,6 +124,30 @@ WAYPOINT_FORMAT = OrderedDict([
     ('version', WAYPOINT_FORMAT['version']),
     ('format', OrderedDict(WAYPOINT_FORMAT['format']))
 ])
+
+# Format Editorタブに表示する、ウェイポイント各パラメータの解説（デフォルト値の意味）
+WAYPOINT_PARAM_HELP = """【ウェイポイント デフォルトパラメータの意味】
+
+■ 基本フィールド
+・number        : ウェイポイント番号（自動採番）
+・x, y          : マップ座標 [m]（mapフレーム）
+・angle_radians : 姿勢（ヨー角）[rad]
+
+■ 付与タスク（デフォルト値のままの項目はYAML出力から省略されます）
+・rotate        : 到着後に追加で回す角度 [rad]（既定 0.0）
+・stop          : true で到達時に停止（/stop=true を発行）（既定 false）
+・wait_time     : 到達後に待機する時間 [s]（既定 0.0）
+・change_map    : 到達後に切り替える地図名。空文字なら切り替えなし（既定 ""）
+・threshold     : このWPだけの到達判定距離 [m]。負なら全体既定(2.0m)を使用（既定 -1.0）
+・person_area   : true で人物探索エリア。到達後は /stop=false が来るまで停止（既定 false）
+・manual        : 手動記録ステータス。get_pos_ent 等で手動配置したWPのみ true（既定 false）。
+                  地図上では「緑＋手動バッジ」、自動記録(get_pos_dis等)は false（赤）で表示。
+
+■ 補足
+・デフォルト値と等しい属性はエクスポート時に省略されます
+  （例: stop=false は出力されない / manual=false も出力されない）。
+・タスク付きWP（stop/wait_time/change_map/person_area）は到達判定が 0.5m になります。
+"""
 
 # 共通のレイアウト設定
 LAYOUT_MARGINS = 8
@@ -1243,8 +1268,14 @@ class ImageViewer(QWidget):
                             self.pgm_display.editing_waypoint and 
                             self.pgm_display.editing_waypoint.number == waypoint.number)
                 
-                # 編集中は青色で表示
-                color = QColor(0, 120, 255, 255) if is_editing else QColor(255, 0, 0, 255)
+                # 編集中は青、手動記録(manual)は緑、それ以外は赤で表示
+                is_manual = bool(waypoint.get_attribute('manual', False))
+                if is_editing:
+                    color = QColor(0, 120, 255, 255)
+                elif is_manual:
+                    color = QColor(0, 170, 0, 255)
+                else:
+                    color = QColor(255, 0, 0, 255)
                 size_multiplier = WAYPOINT_SETTINGS['EDIT_SIZE_MULT'] if is_editing else 1.0
                 
                 # 矢印の描画
@@ -2995,7 +3026,22 @@ class WaypointListItem(QWidget):
             }
         """)
         number_badge.setFixedWidth(40)
-        
+
+        # 手動記録ステータス（manual=true のときだけ「手動」バッジを表示）
+        manual_badge = None
+        if bool(waypoint.get_attribute('manual', False)):
+            manual_badge = QLabel("手動")
+            manual_badge.setStyleSheet("""
+                QLabel {
+                    color: #ffffff;
+                    background-color: #2e7d32;
+                    border-radius: 3px;
+                    padding: 2px 6px;
+                    font-size: 10px;
+                    font-weight: bold;
+                }
+            """)
+
         # 座標情報（モノスペースフォントで整列）
         self.coord_label = QLabel(f"({waypoint.x:.2f}, {waypoint.y:.2f})")  # インスタンス変数として保存
         self.coord_label.setStyleSheet("""
@@ -3046,6 +3092,8 @@ class WaypointListItem(QWidget):
         # フレームにウィジェットを追加
         frame_layout.addWidget(drag_handle)
         frame_layout.addWidget(number_badge)
+        if manual_badge is not None:
+            frame_layout.addWidget(manual_badge)
         frame_layout.addWidget(self.coord_label, 1)
         frame_layout.addWidget(self.angle_label)
         frame_layout.addWidget(delete_button)
@@ -3930,6 +3978,26 @@ class FormatEditorPanel(QFrame):
         # メインレイアウトに要素を追加
         layout.addWidget(title_label)
         layout.addWidget(content_widget)
+
+        # デフォルトパラメータの解説（読み取り専用）
+        help_label = QLabel("パラメータの意味（デフォルト）")
+        self.help_box = QTextEdit()
+        self.help_box.setReadOnly(True)
+        self.help_box.setPlainText(WAYPOINT_PARAM_HELP)
+        self.help_box.setStyleSheet("""
+            QTextEdit {
+                font-family: sans-serif;
+                font-size: 11px;
+                background-color: #fafafa;
+                border: 1px solid #ddd;
+                border-radius: 3px;
+                padding: 6px;
+                min-height: 150px;
+            }
+        """)
+        self.help_box.setVerticalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAsNeeded)
+        layout.addWidget(help_label)
+        layout.addWidget(self.help_box)
 
         # 初期フォーマットを表示
         self.show_current_format()

@@ -32,6 +32,7 @@ EXPECTED_FIELDS = [
     'change_map',
     'threshold',
     'person_area',
+    'manual',
 ]
 
 

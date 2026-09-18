@@ -55,7 +55,8 @@ WAYPOINT_FORMAT = {
         'wait_time': 'float',   # 待機時間 (秒)
         'change_map': 'string', # 切り替え先の地図名
         'threshold': 'float',   # 個別の到着判定距離
-        'person_area': 'bool'   # 人物探索エリア
+        'person_area': 'bool',  # 人物探索エリア
+        'manual': 'bool'        # 手動記録ステータス（手動配置した場合のみtrue）
     }
 }
 
