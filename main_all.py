@@ -8,11 +8,40 @@ from PySide6.QtWidgets import (QApplication, QMainWindow, QWidget, QVBoxLayout,
                               QFileDialog, QScrollArea, QSplitter, QGesture, 
                               QPinchGesture, QSlider, QCheckBox, QFrame, QTextEdit,
                               QMessageBox, QDialog, QLineEdit, QToolTip)
-from PySide6.QtCore import Qt, QPoint, Signal, QEvent, QSize, QMimeData, QTimer, QRect
+from PySide6.QtCore import Qt, QPoint, Signal, QEvent, QSize, QMimeData, QTimer, QRect, QRectF
 from PySide6.QtGui import (QPixmap, QImage, QWheelEvent, QPainter, QPen, QCursor,
                           QDrag, QColor, QPolygon)  # QDragをQtGuiからインポート
 from enum import Enum
 from collections import OrderedDict
+
+
+def read_pgm_file(path):
+    """P5 PGM を読み込み (ndarray, width, height) を返す。失敗時は (None, 0, 0)。
+
+    路面マッピングの色付き地図（.colored.pgm）はインデックス値のPGMなので、
+    呼び出し側で JSON の palette を使って RGB 化する。
+    """
+    try:
+        with open(path, 'rb') as f:
+            magic = f.readline().decode('ascii').strip()
+            if magic != 'P5':
+                return None, 0, 0
+            while True:
+                line = f.readline().decode('ascii').strip()
+                if not line.startswith('#'):
+                    break
+            width, height = map(int, line.split())
+            max_val = int(f.readline().decode('ascii').strip())
+            data = f.read()
+            if max_val > 255:
+                arr = np.frombuffer(data, dtype='>u2')
+            else:
+                arr = np.frombuffer(data, dtype=np.uint8)
+            arr = np.asarray(arr[:width * height]).reshape((height, width))
+            return arr, width, height
+    except Exception:
+        return None, 0, 0
+
 
 # 共通のスタイル定義
 COMMON_STYLES = """
@@ -717,6 +746,7 @@ class ImageViewer(QWidget):
         self.active_layer = None
         
         # 基本レイヤーの作成とシグナル接続
+        self.roadmap_layer = Layer("Road Map Layer")  # 路面マッピング色付き地図（SLAM地図の下）
         self.pgm_layer = Layer("PGM Layer")
         self.drawing_layer = Layer("Drawing Layer")
         self.waypoint_layer = Layer("Waypoint Layer")
@@ -724,7 +754,8 @@ class ImageViewer(QWidget):
         self.origin_layer = Layer("Origin Layer")
         self.path_layer = Layer("Path Layer")
         self.layers = [
-            self.pgm_layer,       # 1. PGM画像（最下層）
+            self.roadmap_layer,   # 0. 路面マップ（最下層・オプション）
+            self.pgm_layer,       # 1. PGM画像
             self.drawing_layer,   # 2. ペンと消しゴムの描画
             self.path_layer,      # 3. パス
             self.waypoint_layer,  # 4. ウェイポイント
@@ -743,6 +774,9 @@ class ImageViewer(QWidget):
         self.grid_size = 50
         self.origin_point = None
         self.resolution = 0.05
+        self.map_origin = None            # ベース地図のワールド原点 [x, y]（YAMLのorigin）
+        self.roadmap_resolution = None    # 路面マップの解像度（colored.json）
+        self.roadmap_origin = None        # 路面マップのワールド原点 [x, y]（colored.json）
         self.current_map_yaml_path = None
 
         # 各コンポーネントの設定
@@ -1164,7 +1198,11 @@ class ImageViewer(QWidget):
         
         painter = QPainter(result)
         
-        # 1. PGMレイヤーを描画（最下層）
+        # 0. 路面マップレイヤーを描画（最下層・原点合わせ）
+        if self.roadmap_layer.visible and self.roadmap_layer.pixmap:
+            self._draw_roadmap(painter, result.size())
+
+        # 1. PGMレイヤーを描画
         if (self.pgm_layer.visible and self.pgm_layer.pixmap):
             painter.setOpacity(self.pgm_layer.opacity)
             painter.drawPixmap(0, 0, self.pgm_layer.pixmap)
@@ -1531,6 +1569,8 @@ class ImageViewer(QWidget):
                 if len(origin) >= 2:
                     # 解像度を保存
                     self.resolution = float(yaml_data.get('resolution', 0.05))
+                    # ワールド原点を保存（路面マップとの原点合わせに使用）
+                    self.map_origin = (float(origin[0]), float(origin[1]))
                     x_pixel = int(-origin[0] / self.resolution)
                     y_pixel = int(-origin[1] / self.resolution)
                     
@@ -1600,6 +1640,145 @@ class ImageViewer(QWidget):
         painter.end()
         
         self.update_display()
+
+    def load_roadmap_file(self, file_path):
+        """路面マッピングの色付き地図を下レイヤーとして読み込む。
+
+        .colored.pgm + .colored.json（パレット復元、resolution/origin）と
+        .png/.jpg/.jpeg に対応。JSON の resolution/origin で SLAM 地図と原点合わせする。
+        """
+        try:
+            base = file_path
+            lower = base.lower()
+            if lower.endswith('.colored.json'):
+                stem = base[:-len('.colored.json')]
+            elif lower.endswith('.json'):
+                stem = base[:-5]
+            elif lower.endswith('.colored.pgm'):
+                stem = base[:-len('.colored.pgm')]
+            elif lower.endswith('.color.png'):
+                stem = base[:-len('.color.png')]
+            elif lower.endswith('.texture.png'):
+                stem = base[:-len('.texture.png')]
+            elif lower.endswith('.pgm'):
+                stem = base[:-4]
+            elif lower.endswith('.png'):
+                stem = base[:-4]
+            elif lower.endswith(('.jpg', '.jpeg')):
+                stem = base.rsplit('.', 1)[0]
+            else:
+                stem = os.path.splitext(base)[0]
+
+            # 画像本体の選択:
+            #   実写色の .color.png / .texture.png を優先する。既存の .colored.pgm は
+            #   パレット割当に不具合があり実色と大きく異なるため、PNGがあればそちらを使う。
+            if lower.endswith(('.png', '.jpg', '.jpeg')):
+                candidates = [file_path]
+            else:
+                candidates = [
+                    stem + '.color.png',
+                    stem + '.texture.png',
+                    stem + '.colored.pgm',
+                    stem + '.pgm',
+                    stem + '.png',
+                    stem + '.jpg',
+                ]
+            image_path = next((p for p in candidates if os.path.exists(p)), None)
+            if image_path is None:
+                raise FileNotFoundError(f'road map image not found for {file_path}')
+
+            # JSONメタ（パレット / resolution / origin）
+            json_candidates = [stem + '.colored.json', stem + '.json']
+            if lower.endswith('.json'):
+                json_candidates.insert(0, file_path)
+            json_path = next((p for p in json_candidates if os.path.exists(p)), None)
+            meta = None
+            if json_path:
+                with open(json_path, 'r') as f:
+                    meta = json.load(f)
+
+            q_img = self._load_roadmap_image(image_path, meta)
+            if q_img is None or q_img.isNull():
+                raise ValueError(f'failed to load road map image: {image_path}')
+
+            self.roadmap_layer.pixmap = QPixmap.fromImage(q_img)
+            self.roadmap_layer.visible = True
+
+            if meta and 'resolution' in meta and meta.get('origin') and len(meta['origin']) >= 2:
+                self.roadmap_resolution = float(meta['resolution'])
+                self.roadmap_origin = (float(meta['origin'][0]), float(meta['origin'][1]))
+            else:
+                self.roadmap_resolution = None
+                self.roadmap_origin = None
+
+            # 下レイヤーが見えるように SLAM 地図を半透明にする
+            if self.pgm_layer.opacity > 0.7:
+                self.pgm_layer.set_opacity(0.6)
+
+            print(f'Loaded road map: {image_path} size={q_img.width()}x{q_img.height()} '
+                  f'res={self.roadmap_resolution} origin={self.roadmap_origin}')
+            self.update_display()
+            self.layer_changed.emit()
+        except Exception as e:
+            print(f'Error loading road map: {str(e)}')
+            import traceback
+            traceback.print_exc()
+
+    def _load_roadmap_image(self, image_path, meta):
+        """路面マップ画像を QImage に変換する（.colored.pgm は palette でRGB化）。"""
+        lower = image_path.lower()
+        if lower.endswith('.pgm'):
+            arr, width, height = read_pgm_file(image_path)
+            if arr is None:
+                return None
+            palette = meta.get('palette') if meta else None
+            if palette:
+                palette_arr = np.array(palette, dtype=np.uint8)
+                n_colors = palette_arr.shape[0]
+                rgb = np.zeros((height, width, 3), dtype=np.uint8)
+                valid = arr < n_colors
+                rgb[valid] = palette_arr[arr[valid]][:, :3]
+                alpha = np.where(valid, 255, 0).astype(np.uint8)
+                alpha[arr == 0] = 0  # index 0（unknown/背景）は透明
+                rgba = np.ascontiguousarray(np.dstack([rgb, alpha]))
+                q_img = QImage(rgba.tobytes(), width, height, width * 4,
+                               QImage.Format.Format_RGBA8888)
+                return q_img.copy()
+            # パレット無しはグレースケール
+            arr = np.ascontiguousarray(arr)
+            q_img = QImage(arr.tobytes(), width, height, width,
+                           QImage.Format.Format_Grayscale8)
+            return q_img.copy()
+        # png/jpg はそのまま読み込み
+        return QImage(image_path)
+
+    def _draw_roadmap(self, painter, target_size):
+        """路面マップをベース地図のピクセル座標へ原点合わせして描画する。"""
+        pm = self.roadmap_layer.pixmap
+        if pm is None or pm.isNull():
+            return
+        painter.setOpacity(self.roadmap_layer.opacity)
+        if (self.roadmap_origin and self.roadmap_resolution
+                and self.map_origin and self.resolution and self.pgm_layer.pixmap):
+            ox_b, oy_b = self.map_origin
+            r_b = self.resolution
+            ox_r, oy_r = self.roadmap_origin
+            r_r = self.roadmap_resolution
+            w_r = pm.width()
+            h_r = pm.height()
+            base_h = self.pgm_layer.pixmap.height()
+            # ROS規約: origin=左下, 画像row0=上
+            px0 = (ox_r - ox_b) / r_b
+            px1 = (ox_r + w_r * r_r - ox_b) / r_b
+            py0 = base_h - (oy_r + h_r * r_r - oy_b) / r_b
+            py1 = base_h - (oy_r - oy_b) / r_b
+            target = QRectF(px0, py0, px1 - px0, py1 - py0)
+            painter.drawPixmap(target, pm, QRectF(0, 0, w_r, h_r))
+        else:
+            # 位置合わせ情報が無い場合はベースサイズにフィット
+            painter.drawPixmap(
+                QRectF(0, 0, target_size.width(), target_size.height()),
+                pm, QRectF(0, 0, pm.width(), pm.height()))
 
     def generate_path(self):
         """ウェイポイント間のパスを生成または非表示"""
@@ -1944,6 +2123,7 @@ class MenuPanel(QWidget):
     file_selected = Signal(str)  # ファイル選択時のシグナル
     zoom_value_changed = Signal(int)  # ズーム値変更時のシグナル
     yaml_selected = Signal(str)  # YAMLファイル選択用のシグナルを追加
+    roadmap_selected = Signal(str)  # 路面マップ（色付き地図）選択用シグナル
     undo_requested = Signal()  # 戻るボタン用シグナル
     redo_requested = Signal()  # 進むボタン用シグナル
     
@@ -2029,12 +2209,17 @@ class MenuPanel(QWidget):
         # YAMLファイル選択ボタンを追加
         self.yaml_button = QPushButton("Select YAML File")
         self.yaml_button.clicked.connect(self.open_yaml_dialog)
+
+        # 路面マッピング色付き地図（下レイヤー）選択ボタン
+        self.roadmap_button = QPushButton("Select Road Map")
+        self.roadmap_button.clicked.connect(self.open_roadmap_dialog)
         
         self.file_name_label = QLabel("No file selected")  # ファイル名表示用ラベル
         self.file_name_label.setStyleSheet("color: #666; padding: 0 10px;")
         
         file_layout.addWidget(self.select_button)
         file_layout.addWidget(self.yaml_button)  # YAMLボタンを追加
+        file_layout.addWidget(self.roadmap_button)  # 路面マップボタンを追加
         file_layout.addWidget(self.file_name_label, stretch=1)  # stretchを1に設定して余白を埋める
         
         # ズームコントロールをメソッドに分離
@@ -2122,6 +2307,17 @@ class MenuPanel(QWidget):
         )
         if file_name:
             self.yaml_selected.emit(file_name)
+
+    def open_roadmap_dialog(self):
+        """路面マッピング色付き地図の選択ダイアログを開く"""
+        file_name, _ = QFileDialog.getOpenFileName(
+            self,
+            "Open Road Map (colored)",
+            "",
+            "Road Map (*.colored.pgm *.pgm *.png *.jpg *.jpeg *.json);;All Files (*)"
+        )
+        if file_name:
+            self.roadmap_selected.emit(file_name)
 
     def update_undo_redo_actions(self, can_undo, can_redo):
         """Undo/Redoボタンの状態を更新"""
@@ -3134,6 +3330,9 @@ class MainWindow(QMainWindow):
         # YAMLファイル選択時の処理を接続
         self.menu_panel.yaml_selected.connect(self.load_yaml_file)
 
+        # 路面マップ選択時の処理を接続
+        self.menu_panel.roadmap_selected.connect(self.load_roadmap_file)
+
         # 戻る/進むボタンのシグナルを接続
         self.menu_panel.undo_requested.connect(self.image_viewer.undo)
         self.menu_panel.redo_requested.connect(self.image_viewer.redo)
@@ -3256,6 +3455,11 @@ class MainWindow(QMainWindow):
             print(f"Error loading PGM file: {str(e)}")
             import traceback
             traceback.print_exc()
+
+    def load_roadmap_file(self, file_path):
+        """路面マッピング色付き地図を読み込む（原点合わせはJSONのresolution/origin）"""
+        self.image_viewer.load_roadmap_file(file_path)
+        self.update_layer_panel()
 
     def handle_zoom_value_changed(self, value):
         """ズームスライダーの値変更を処理
