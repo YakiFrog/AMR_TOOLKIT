@@ -857,6 +857,8 @@ class ImageViewer(QWidget):
         self.inflation_negate = 0              # ROS map YAML の negate
         self._inflation_params_key = None
         self._inflation_rgba = None            # 膨張オーバーレイのRGBAキャッシュ（局所更新用）
+        self._inflation_cost = None            # 膨張コストグリッド(0-254)（パス計画用）
+        self._inflation_cost_key = None
         self._inflation_timer = QTimer(self)
         self._inflation_timer.setSingleShot(True)
         self._inflation_timer.setInterval(250)
@@ -1276,6 +1278,8 @@ class ImageViewer(QWidget):
         self.inflation_layer.pixmap = None
         self._inflation_params_key = None
         self._inflation_rgba = None
+        self._inflation_cost = None
+        self._inflation_cost_key = None
         self.update_display()
         self.coord_label.show()  # 画像読み込み時に座標表示を有効化
         if self.inflation_enabled:
@@ -1335,8 +1339,8 @@ class ImageViewer(QWidget):
         occupied_prob = pixels if self.inflation_negate else (1.0 - pixels)
         return occupied_prob >= float(self.inflation_occupied_thresh)
 
-    def _compute_inflation_rgba(self, occupied, resolution, radius_m, cost_scaling, inscribed_m):
-        """RVizのcostmap配色で膨張オーバーレイRGBA(H,W,4)を計算する。"""
+    def _compute_inflation_cost(self, occupied, resolution, radius_m, cost_scaling, inscribed_m):
+        """Nav2 inflation_layer と同じコスト値(0-254)を計算する。"""
         height, width = occupied.shape
         max_cells = int(np.ceil(radius_m / resolution)) if radius_m > 0 else 0
 
@@ -1376,8 +1380,11 @@ class ImageViewer(QWidget):
             cost[inflated] = np.clip((decay * 252.0).astype(np.int32), 1, 252).astype(np.uint8)
         cost[(~occupied) & (dist_m <= inscribed_m)] = 253
         cost[occupied] = 254
+        return cost
 
-        # RVizのcostmap配色を再現:
+    def _cost_to_rgba(self, cost):
+        """RVizのcostmap配色でコスト値をRGBAへ変換する。"""
+        height, width = cost.shape
         #   1-252(膨張): 青(低コスト/外側) -> 赤(高コスト/障害物付近)
         #   253(内接): シアン, 254(致死): 紫
         rgba = np.zeros((height, width, 4), dtype=np.uint8)
@@ -1400,23 +1407,62 @@ class ImageViewer(QWidget):
         return QPixmap.fromImage(q_img)
 
     def _build_inflation_pixmap(self):
-        """地図全体の膨張オーバーレイを計算し、RGBAキャッシュも更新する。"""
+        """地図全体の膨張オーバーレイを計算し、コスト/RGBAキャッシュも更新する。"""
         image = self.map_image_array
         if image is None or image.ndim != 2:
             self._inflation_rgba = None
+            self._inflation_cost = None
             return None
         resolution = float(self.resolution) if self.resolution and self.resolution > 0 else 0.05
         occupied = self._occupied_mask(image)
         if not occupied.any():
             self._inflation_rgba = None
+            self._inflation_cost = None
             return None
         radius_m = self.inflation_radius
         inscribed_m = min(self.inflation_inscribed_radius, radius_m)
-        rgba = self._compute_inflation_rgba(
+        cost = self._compute_inflation_cost(
             occupied, resolution, radius_m, self.inflation_cost_scaling, inscribed_m
         )
+        self._inflation_cost = cost
+        self._inflation_cost_key = self._inflation_cache_key()
+        rgba = self._cost_to_rgba(cost)
         self._inflation_rgba = rgba
         return self._rgba_to_pixmap(rgba)
+
+    def _inflation_cache_key(self):
+        """膨張コストのキャッシュが有効かを判定するためのキー。"""
+        return (
+            None if self.map_image_array is None else self.map_image_array.shape,
+            round(float(self.resolution or 0.0), 6),
+            round(float(self.inflation_radius), 4),
+            round(float(self.inflation_cost_scaling), 4),
+            round(float(self.inflation_inscribed_radius), 4),
+            round(float(self.inflation_occupied_thresh), 4),
+            int(self.inflation_negate),
+        )
+
+    def _ensure_cost_grid(self):
+        """パス計画用の膨張コストグリッド(0-254)を取得する（必要なら計算）。"""
+        if self.map_image_array is None:
+            return None
+        key = self._inflation_cache_key()
+        if self._inflation_cost is not None and self._inflation_cost_key == key:
+            return self._inflation_cost
+        resolution = float(self.resolution) if self.resolution and self.resolution > 0 else 0.05
+        occupied = self._occupied_mask(self.map_image_array)
+        radius_m = self.inflation_radius
+        inscribed_m = min(self.inflation_inscribed_radius, radius_m)
+        QApplication.setOverrideCursor(Qt.CursorShape.WaitCursor)
+        try:
+            cost = self._compute_inflation_cost(
+                occupied, resolution, radius_m, self.inflation_cost_scaling, inscribed_m
+            )
+        finally:
+            QApplication.restoreOverrideCursor()
+        self._inflation_cost = cost
+        self._inflation_cost_key = key
+        return cost
 
     def _update_inflation_region(self, bbox):
         """消去などで変化した局所領域だけ膨張オーバーレイを再計算する。
@@ -1442,17 +1488,19 @@ class ImageViewer(QWidget):
 
         sub_image = self.map_image_array[wy0:wy1, wx0:wx1]
         occupied = self._occupied_mask(sub_image)
-        sub_rgba = self._compute_inflation_rgba(
+        sub_cost = self._compute_inflation_cost(
             occupied, resolution, radius_m, self.inflation_cost_scaling, inscribed_m
         )
-        inner = sub_rgba[iy0 - wy0:iy1 - wy0, ix0 - wx0:ix1 - wx0]
+        inner_cost = sub_cost[iy0 - wy0:iy1 - wy0, ix0 - wx0:ix1 - wx0]
 
         if self._inflation_rgba is None or self._inflation_rgba.shape != (height, width, 4):
             # キャッシュが無い場合は全体を計算し直す
             self.inflation_layer.pixmap = self._build_inflation_pixmap()
             return
 
-        self._inflation_rgba[iy0:iy1, ix0:ix1] = inner
+        self._inflation_rgba[iy0:iy1, ix0:ix1] = self._cost_to_rgba(inner_cost)
+        if self._inflation_cost is not None and self._inflation_cost.shape == (height, width):
+            self._inflation_cost[iy0:iy1, ix0:ix1] = inner_cost
         if self.inflation_layer.pixmap is None:
             self.inflation_layer.pixmap = self._rgba_to_pixmap(self._inflation_rgba)
         else:
@@ -2192,7 +2240,7 @@ class ImageViewer(QWidget):
                 pm, QRectF(0, 0, pm.width(), pm.height()))
 
     def generate_path(self):
-        """ウェイポイント間のパスを生成または非表示"""
+        """ウェイポイント間のパスを生成または非表示（Nav2同様、膨張コスト上でA*探索）"""
         if self.waypoints and len(self.waypoints) >= 2:
             if not self.path_layer.pixmap or self.path_layer.pixmap.size() != self.pgm_layer.pixmap.size():
                 self.path_layer.pixmap = QPixmap(self.pgm_layer.pixmap.size())
@@ -2207,23 +2255,388 @@ class ImageViewer(QWidget):
                 
             if parent and parent.right_panel.generate_path_button.isChecked():
                 if self.waypoints and len(self.waypoints) >= 2:
+                    cost = self._ensure_cost_grid()
+                    points = self._plan_waypoint_path(cost)
+
                     painter = QPainter(self.path_layer.pixmap)
                     painter.setRenderHint(QPainter.RenderHint.Antialiasing)
-                    
+
                     # パスのスタイル設定
-                    pen = QPen(Qt.GlobalColor.green, 3)  # 青色、太さ3
+                    pen = QPen(Qt.GlobalColor.green, 3)
                     pen.setStyle(Qt.PenStyle.SolidLine)
                     painter.setPen(pen)
-                    
-                    # ウェイポイントを順番に接続
-                    for i in range(len(self.waypoints) - 1):
-                        start = self.waypoints[i]
-                        end = self.waypoints[i + 1]
-                        painter.drawLine(start.pixel_x, start.pixel_y, end.pixel_x, end.pixel_y)
-                    
+
+                    for i in range(len(points) - 1):
+                        painter.drawLine(points[i][0], points[i][1], points[i + 1][0], points[i + 1][1])
+
                     painter.end()
 
             self.update_display()
+
+    def _plan_waypoint_path(self, cost):
+        """ウェイポイント間を膨張コスト上でA*計画し、描画用の点列を返す。"""
+        points = []
+        for i in range(len(self.waypoints) - 1):
+            start = (self.waypoints[i].pixel_x, self.waypoints[i].pixel_y)
+            goal = (self.waypoints[i + 1].pixel_x, self.waypoints[i + 1].pixel_y)
+            segment = self._plan_segment(cost, start, goal) if cost is not None else None
+            if not segment:
+                segment = [start, goal]
+            if points:
+                segment = segment[1:]
+            points.extend(segment)
+        return points
+
+    def _plan_segment(self, cost, start, goal):
+        """1区間をNav2 NavFn同様に計画する（ポテンシャル場＋勾配降下＋SimpleSmoother）。"""
+        height, width = cost.shape
+        sx, sy = int(start[0]), int(start[1])
+        gx, gy = int(goal[0]), int(goal[1])
+        sx = min(max(sx, 0), width - 1); sy = min(max(sy, 0), height - 1)
+        gx = min(max(gx, 0), width - 1); gy = min(max(gy, 0), height - 1)
+        if (sx, sy) == (gx, gy):
+            return [(sx, sy)]
+
+        # 探索窓（ウェイポイント近傍のみ探索して高速化）。見つからなければ広げる。
+        base_margin = max(64, int(np.hypot(gx - sx, gy - sy) * 0.5))
+        for margin in (base_margin, base_margin * 3, max(width, height)):
+            x0 = max(0, min(sx, gx) - margin)
+            x1 = min(width, max(sx, gx) + margin + 1)
+            y0 = max(0, min(sy, gy) - margin)
+            y1 = min(height, max(sy, gy) + margin + 1)
+            window = cost[y0:y1, x0:x1]
+
+            # 巨大な窓はダウンサンプルして探索量を抑える（障害物は最大値で保持）
+            area = window.shape[0] * window.shape[1]
+            step = 1
+            if area > 250000:
+                step = int(np.ceil(np.sqrt(area / 250000.0)))
+
+            if step > 1:
+                grid, cstart, cgoal = self._downsample_window(
+                    window, (sx - x0, sy - y0), (gx - x0, gy - y0), step)
+            else:
+                grid = window
+                cstart = (sx - x0, sy - y0)
+                cgoal = (gx - x0, gy - y0)
+
+            # NavFn: ゴールからのポテンシャル場を計算し、勾配降下で経路抽出
+            path = self._navfn_path(grid, cstart, cgoal)
+            if path is None:
+                # 勾配降下が失敗した場合はA*の親チェーンへフォールバック
+                raw = self._astar_window(grid, cstart, cgoal)
+                if raw is None:
+                    continue
+                path = [(float(px), float(py)) for px, py in raw]
+
+            if step > 1:
+                full = [(x0 + px * step + step // 2, y0 + py * step + step // 2)
+                        for px, py in path]
+            else:
+                full = [(x0 + px, y0 + py) for px, py in path]
+            full[0] = (sx, sy)
+            full[-1] = (gx, gy)
+
+            # Nav2 SimpleSmoother相当で平滑化（障害物へ食い込む場合は元パスを使う）
+            smoothed = self._simple_smooth(full, cost)
+            return smoothed if self._path_is_free(smoothed, cost) else full
+        return None
+
+    def _navfn_path(self, grid, start, goal):
+        """NavFn同様、ゴールからのポテンシャル場を勾配降下して経路を得る。"""
+        potential = self._astar_potential(grid, goal)
+        return self._gradient_path(potential, start, goal)
+
+    def _astar_potential(self, grid, goal):
+        """ゴールからのポテンシャル（コスト）場をA*(g+ヒューリスティック)で計算する。"""
+        import heapq
+
+        h, w = grid.shape
+        gx = min(max(int(goal[0]), 0), w - 1)
+        gy = min(max(int(goal[1]), 0), h - 1)
+        blocked = grid >= 253
+        blocked[gy, gx] = False
+
+        cost_neutral = 50.0
+        cost_factor = 0.8
+        step_cost = (cost_neutral + grid.astype(np.float32) * cost_factor).astype(np.float32)
+        ys, xs = np.mgrid[0:h, 0:w]
+        heuristic = (np.hypot(xs - gx, ys - gy) * cost_neutral).astype(np.float32)
+
+        n = h * w
+        pot = np.full(n, np.float32(1.0e10), dtype=np.float32)
+        closed = np.zeros(n, dtype=bool)
+        gidx = gy * w + gx
+        pot[gidx] = 0.0
+        heap = [(0.0, gidx)]
+        neighbors = ((-1, -1, 1.41421356), (-1, 0, 1.0), (-1, 1, 1.41421356),
+                     (0, -1, 1.0), (0, 1, 1.0),
+                     (1, -1, 1.41421356), (1, 0, 1.0), (1, 1, 1.41421356))
+        while heap:
+            _, idx = heapq.heappop(heap)
+            if closed[idx]:
+                continue
+            closed[idx] = True
+            cy, cx = divmod(idx, w)
+            base = pot[idx]
+            for dy, dx, dist in neighbors:
+                ny = cy + dy
+                nx = cx + dx
+                if ny < 0 or nx < 0 or ny >= h or nx >= w:
+                    continue
+                nidx = ny * w + nx
+                if closed[nidx] or blocked[ny, nx]:
+                    continue
+                tentative = base + dist * step_cost[ny, nx]
+                if tentative < pot[nidx]:
+                    pot[nidx] = tentative
+                    heapq.heappush(heap, (float(tentative) + float(heuristic[ny, nx]), nidx))
+        return pot.reshape(h, w)
+
+    def _gradient_path(self, potential, start, goal):
+        """NavFn calcPath 相当: ポテンシャル場を勾配降下してサブピクセル経路を抽出。"""
+        h, w = potential.shape
+        if h < 3 or w < 3:
+            return None
+        pot = potential.reshape(-1)
+        POT_HIGH = 1.0e10
+        COST_NEUTRAL = 50.0
+        path_step = 0.5
+
+        sx = min(max(int(start[0]), 1), w - 2)
+        sy = min(max(int(start[1]), 1), h - 2)
+        stc = sy * w + sx
+        dx = dy = 0.0
+        path = [(float(sx), float(sy))]
+
+        for _ in range(200000):
+            nearest = stc + int(round(dx)) + w * int(round(dy))
+            nearest = min(max(nearest, 0), h * w - 1)
+            if pot[nearest] < COST_NEUTRAL:
+                path.append((float(goal[0]), float(goal[1])))
+                return path
+            if stc < w or stc >= (h - 1) * w:
+                return path if len(path) > 1 else None
+
+            path.append((float(stc % w) + dx, float(stc // w) + dy))
+
+            stcnx = stc + w
+            stcpx = stc - w
+            nbrs = (stc, stc + 1, stc - 1, stcnx, stcnx + 1, stcnx - 1,
+                    stcpx, stcpx + 1, stcpx - 1)
+            if any(pot[i] >= POT_HIGH for i in nbrs) or self._path_oscillates(path):
+                minc = stc
+                minp = pot[stc]
+                for i in nbrs:
+                    if pot[i] < minp:
+                        minp = pot[i]
+                        minc = i
+                stc = minc
+                dx = dy = 0.0
+                if pot[stc] >= POT_HIGH:
+                    return None
+            else:
+                gx = self._interp_grad(pot, stc, stc + 1, stcnx, stcnx + 1, dx, dy, w, h, True)
+                gy = self._interp_grad(pot, stc, stc + 1, stcnx, stcnx + 1, dx, dy, w, h, False)
+                if gx == 0.0 and gy == 0.0:
+                    return None
+                ss = path_step / np.hypot(gx, gy)
+                dx += gx * ss
+                dy += gy * ss
+                if dx > 1.0:
+                    stc += 1; dx -= 1.0
+                if dx < -1.0:
+                    stc -= 1; dx += 1.0
+                if dy > 1.0:
+                    stc += w; dy -= 1.0
+                if dy < -1.0:
+                    stc -= w; dy += 1.0
+        return path if len(path) > 1 else None
+
+    @staticmethod
+    def _path_oscillates(path):
+        return len(path) > 2 and path[-1] == path[-3]
+
+    def _interp_grad(self, pot, a, b, c, d, dx, dy, w, h, x_axis):
+        """4点(a,b,c,d)の勾配を双線形補間する。a=stc, b=stc+1, c=stc+w, d=stc+w+1"""
+        ga = self._grad_at(pot, a, w, h, x_axis)
+        gb = self._grad_at(pot, b, w, h, x_axis)
+        gc = self._grad_at(pot, c, w, h, x_axis)
+        gd = self._grad_at(pot, d, w, h, x_axis)
+        x1 = (1.0 - dx) * ga + dx * gb
+        x2 = (1.0 - dx) * gc + dx * gd
+        return (1.0 - dy) * x1 + dy * x2
+
+    @staticmethod
+    def _grad_at(pot, n, w, h, x_axis):
+        """NavFn gradCell 相当: ポテンシャルの勾配（ゴールへ向かう向き）。"""
+        POT_HIGH = 1.0e10
+        x = n % w
+        y = n // w
+        if x <= 0 or x >= w - 1 or y <= 0 or y >= h - 1:
+            return 0.0
+        cv = pot[n]
+        if cv >= POT_HIGH:
+            if x_axis:
+                if pot[n - 1] < POT_HIGH:
+                    return -1.0
+                if pot[n + 1] < POT_HIGH:
+                    return 1.0
+            else:
+                if pot[n - w] < POT_HIGH:
+                    return -1.0
+                if pot[n + w] < POT_HIGH:
+                    return 1.0
+            return 0.0
+        dx = 0.0
+        dy = 0.0
+        if pot[n - 1] < POT_HIGH:
+            dx += pot[n - 1] - cv
+        if pot[n + 1] < POT_HIGH:
+            dx += cv - pot[n + 1]
+        if pot[n - w] < POT_HIGH:
+            dy += pot[n - w] - cv
+        if pot[n + w] < POT_HIGH:
+            dy += cv - pot[n + w]
+        norm = np.hypot(dx, dy)
+        if norm <= 0.0:
+            return 0.0
+        return (dx if x_axis else dy) / norm
+
+    def _simple_smooth(self, points, cost, data_w=0.2, smooth_w=0.3,
+                       tolerance=1e-10, max_its=1000, refinement=2):
+        """Nav2 SimpleSmoother相当（w_data=0.2, w_smooth=0.3, do_refinement=2）。"""
+        if len(points) <= 2:
+            return points
+        h, w = cost.shape
+        y = np.array(points, dtype=np.float64)
+        for _ in range(refinement + 1):
+            x = y.copy()
+            for _it in range(max_its):
+                y_prev = y.copy()
+                y[1:-1] = (y[1:-1] + data_w * (x[1:-1] - y[1:-1])
+                           + smooth_w * (y[2:] + y[:-2] - 2.0 * y[1:-1]))
+                change = float(np.abs(y[1:-1] - y_prev[1:-1]).sum())
+                xs = np.clip(np.round(y[:, 0]).astype(np.int64), 0, w - 1)
+                ys = np.clip(np.round(y[:, 1]).astype(np.int64), 0, h - 1)
+                if np.any(cost[ys, xs] >= 253):
+                    y = y_prev
+                    break
+                if change < tolerance:
+                    break
+        return [(float(p[0]), float(p[1])) for p in y]
+
+    @staticmethod
+    def _path_is_free(points, cost):
+        """パス上のサンプル点が致死/内接セル(>=253)を通っていないか確認する。"""
+        height, width = cost.shape
+        for i in range(len(points) - 1):
+            x0, y0 = points[i]
+            x1, y1 = points[i + 1]
+            steps = int(max(abs(x1 - x0), abs(y1 - y0))) + 1
+            for t in range(steps + 1):
+                x = int(round(x0 + (x1 - x0) * t / steps))
+                y = int(round(y0 + (y1 - y0) * t / steps))
+                if 0 <= x < width and 0 <= y < height and cost[y, x] >= 253:
+                    return False
+        return True
+
+    @staticmethod
+    def _downsample_window(window, start, goal, step):
+        """コスト窓を最大値プーリングで縮小し、始点/終点も粗座標へ変換する。"""
+        h, w = window.shape
+        ch = (h + step - 1) // step
+        cw = (w + step - 1) // step
+        padded = np.pad(window, ((0, ch * step - h), (0, cw * step - w)), constant_values=0)
+        coarse = padded.reshape(ch, step, cw, step).max(axis=(1, 3))
+        return coarse, (start[0] // step, start[1] // step), (goal[0] // step, goal[1] // step)
+
+    def _astar_window(self, grid, start, goal):
+        """8近傍A*。コストはNavFn同様 COST_NEUTRAL + COST_FACTOR*cost を用いる。"""
+        import heapq
+
+        h, w = grid.shape
+        sx, sy = start
+        gx, gy = goal
+        blocked = grid >= 253
+        blocked[sy, sx] = False
+        blocked[gy, gx] = False
+
+        cost_neutral = 50.0
+        cost_factor = 0.8
+        # コストが高すぎる領域を避けるため、距離に応じた重みを掛ける
+        step_cost = np.zeros((h, w), dtype=np.float32)
+        np.add(cost_neutral, grid.astype(np.float32) * cost_factor, out=step_cost)
+        step_cost /= cost_neutral
+
+        ys, xs = np.mgrid[0:h, 0:w]
+        heuristic = np.hypot(xs - gx, ys - gy).astype(np.float32)
+
+        n = h * w
+        g_score = np.full(n, np.inf, dtype=np.float32)
+        parent = np.full(n, -1, dtype=np.int32)
+        closed = np.zeros(n, dtype=bool)
+        sidx = sy * w + sx
+        gidx = gy * w + gx
+        g_score[sidx] = 0.0
+
+        neighbors = ((-1, -1, 1.41421356), (-1, 0, 1.0), (-1, 1, 1.41421356),
+                     (0, -1, 1.0), (0, 1, 1.0),
+                     (1, -1, 1.41421356), (1, 0, 1.0), (1, 1, 1.41421356))
+        heap = [(float(heuristic[sy, sx]), sidx)]
+        found = False
+        while heap:
+            _, idx = heapq.heappop(heap)
+            if idx == gidx:
+                found = True
+                break
+            if closed[idx]:
+                continue
+            closed[idx] = True
+            cy, cx = divmod(idx, w)
+            base_g = g_score[idx]
+            for dy, dx, dist in neighbors:
+                ny = cy + dy
+                nx = cx + dx
+                if ny < 0 or nx < 0 or ny >= h or nx >= w:
+                    continue
+                nidx = ny * w + nx
+                if closed[nidx] or blocked[ny, nx]:
+                    continue
+                tentative = base_g + dist * step_cost[ny, nx]
+                if tentative < g_score[nidx]:
+                    g_score[nidx] = tentative
+                    parent[nidx] = idx
+                    heapq.heappush(heap, (tentative + float(heuristic[ny, nx]), nidx))
+
+        if not found:
+            return None
+        path = []
+        cur = gidx
+        while cur != -1:
+            cy, cx = divmod(cur, w)
+            path.append((cx, cy))
+            if cur == sidx:
+                break
+            cur = parent[cur]
+        path.reverse()
+        return path
+
+    @staticmethod
+    def _smooth_path(points, iterations=1):
+        """計画パスを軽く平滑化する（Nav2のsmoother相当の簡易処理）。"""
+        if len(points) <= 2:
+            return points
+        pts = [(float(p[0]), float(p[1])) for p in points]
+        for _ in range(iterations):
+            new_pts = [pts[0]]
+            for i in range(1, len(pts) - 1):
+                x = (pts[i - 1][0] + 2 * pts[i][0] + pts[i + 1][0]) / 4.0
+                y = (pts[i - 1][1] + 2 * pts[i][1] + pts[i + 1][1]) / 4.0
+                new_pts.append((x, y))
+            new_pts.append(pts[-1])
+            pts = new_pts
+        return pts
 
     def handle_waypoint_edited(self, waypoint):
         """ウェイポイント編集時の処理"""
@@ -2983,8 +3396,33 @@ class RightPanel(QWidget):
         self.inflation_inscribed_spin.setDecimals(2)
         self.inflation_inscribed_spin.setValue(0.35)
         self.inflation_inscribed_spin.setSuffix(" m")
+        self.inflation_inscribed_spin.setToolTip(
+            "内接半径。ロボットfootprintから自動算出（手動で上書きも可）"
+        )
         form.addWidget(QLabel("Inscribed radius"), 2, 0)
         form.addWidget(self.inflation_inscribed_spin, 2, 1)
+
+        # ロボットの幾何サイズ（footprint）。内接半径はこの4値の最小値から自動算出する。
+        form.addWidget(QLabel("Robot footprint (m)"), 3, 0)
+
+        self.footprint_front_spin = QDoubleSpinBox()
+        self.footprint_back_spin = QDoubleSpinBox()
+        self.footprint_left_spin = QDoubleSpinBox()
+        self.footprint_right_spin = QDoubleSpinBox()
+        footprint_specs = (
+            (self.footprint_front_spin, "Front (+x)", 0.50),
+            (self.footprint_back_spin, "Back (-x)", 0.70),
+            (self.footprint_left_spin, "Left (+y)", 0.35),
+            (self.footprint_right_spin, "Right (-y)", 0.35),
+        )
+        for row, (spin, label, default) in enumerate(footprint_specs, start=4):
+            spin.setRange(0.0, 5.0)
+            spin.setSingleStep(0.05)
+            spin.setDecimals(2)
+            spin.setValue(default)
+            spin.setSuffix(" m")
+            form.addWidget(QLabel(label), row, 0)
+            form.addWidget(spin, row, 1)
 
         content_layout.addLayout(form)
 
@@ -3018,7 +3456,26 @@ class RightPanel(QWidget):
         self.inflation_inscribed_spin.valueChanged.connect(self._emit_inflation_changed)
         self.inflation_opacity_slider.valueChanged.connect(self._emit_inflation_changed)
 
+        # footprint変更時は内接半径を自動算出（シリウスfootprintなら0.35m）
+        for spin, _label, _default in footprint_specs:
+            spin.valueChanged.connect(self._update_inscribed_from_footprint)
+
         return widget
+
+    @staticmethod
+    def sirius_footprint_defaults():
+        """シリウスのfootprint [front, back, left, right] (m)。params/nav2_params.yaml 由来。"""
+        return (0.50, 0.70, 0.35, 0.35)
+
+    def _update_inscribed_from_footprint(self, *args):
+        """footprintの4値の最小値を内接半径として反映する。"""
+        inscribed = min(
+            float(self.footprint_front_spin.value()),
+            float(self.footprint_back_spin.value()),
+            float(self.footprint_left_spin.value()),
+            float(self.footprint_right_spin.value()),
+        )
+        self.inflation_inscribed_spin.setValue(round(inscribed, 3))
 
     def _emit_inflation_changed(self, *args):
         """膨張設定の変更を1つのシグナルで通知する。"""
@@ -3031,10 +3488,15 @@ class RightPanel(QWidget):
         )
 
     def reset_inflation_defaults(self):
-        """シリウスのNav2 global_costmapと同じ膨張設定へ戻す。"""
+        """シリウスのNav2 global_costmapと同じ膨張設定・footprintへ戻す。"""
+        front, back, left, right = self.sirius_footprint_defaults()
+        self.footprint_front_spin.setValue(front)
+        self.footprint_back_spin.setValue(back)
+        self.footprint_left_spin.setValue(left)
+        self.footprint_right_spin.setValue(right)
         self.inflation_radius_spin.setValue(0.75)
         self.inflation_cost_scaling_spin.setValue(3.0)
-        self.inflation_inscribed_spin.setValue(0.35)
+        self.inflation_inscribed_spin.setValue(min(front, back, left, right))
         self.inflation_opacity_slider.setValue(20)
 
     def create_waypoint_panel(self):
