@@ -3218,6 +3218,136 @@ class LayerControl(QWidget):
         """不透明度の変更"""
         self.layer.set_opacity(value / 100.0)
 
+class _CollapsibleHeader(QWidget):
+    """クリックで開閉を通知するヘッダーウィジェット。"""
+
+    clicked = Signal()
+
+    def mousePressEvent(self, event):
+        if event.button() == Qt.MouseButton.LeftButton:
+            self.clicked.emit()
+            event.accept()
+            return
+        super().mousePressEvent(event)
+
+
+class CollapsibleSection(QWidget):
+    """ヘッダーをクリックすると本文を折りたたみ/展開できるセクション。
+
+    既存のパネル（タイトル＋本文）を置き換える形で使う。
+    ヘッダーには `add_header_widget`、本文には `add_content_widget` で
+    ウィジェットを追加する。
+    """
+
+    toggled = Signal(bool)  # 展開状態が変化したときに発火 (True=展開)
+
+    def __init__(self, title, expanded=True, parent=None):
+        super().__init__(parent)
+        self._expanded = bool(expanded)
+        self.setObjectName("CollapsibleSection")
+
+        outer = QVBoxLayout(self)
+        outer.setContentsMargins(0, 0, 0, 0)
+        outer.setSpacing(5)
+
+        # ヘッダー
+        self.header = _CollapsibleHeader()
+        self.header.setObjectName("CollapsibleHeader")
+        self.header.setCursor(Qt.CursorShape.PointingHandCursor)
+        self.header.setStyleSheet("""
+            QWidget#CollapsibleHeader {
+                background-color: #e0e0e0;
+                border-radius: 3px;
+            }
+        """)
+        self.header.clicked.connect(self.toggle)
+
+        self.header_layout = QHBoxLayout(self.header)
+        self.header_layout.setContentsMargins(5, 5, 5, 5)
+        self.header_layout.setSpacing(5)
+
+        # 開閉矢印
+        self.toggle_button = QPushButton()
+        self.toggle_button.setFixedSize(20, 20)
+        self.toggle_button.setCursor(Qt.CursorShape.PointingHandCursor)
+        self.toggle_button.setFocusPolicy(Qt.FocusPolicy.NoFocus)
+        self.toggle_button.setStyleSheet("""
+            QPushButton {
+                background-color: transparent;
+                border: none;
+                color: #333333;
+                font-size: 11px;
+                padding: 0;
+            }
+            QPushButton:hover {
+                background-color: #cfcfcf;
+                border-radius: 3px;
+            }
+        """)
+        self.toggle_button.clicked.connect(self.toggle)
+
+        # タイトル
+        self.title_label = QLabel(title)
+        self.title_label.setStyleSheet("""
+            QLabel {
+                font-size: 14px;
+                font-weight: bold;
+                padding: 0;
+                background-color: transparent;
+                color: #000000;
+            }
+        """)
+
+        self.header_layout.addWidget(self.toggle_button)
+        self.header_layout.addWidget(self.title_label)
+
+        # 本文
+        self.content = QWidget()
+        self.content.setObjectName("CollapsibleContent")
+        self.content_layout = QVBoxLayout(self.content)
+        self.content_layout.setContentsMargins(0, 0, 0, 0)
+        self.content_layout.setSpacing(5)
+
+        outer.addWidget(self.header)
+        outer.addWidget(self.content)
+
+        self._apply_state()
+
+    def add_header_widget(self, widget, stretch=0):
+        """ヘッダー右側にウィジェットを追加する。"""
+        self.header_layout.addWidget(widget, stretch)
+
+    def add_header_stretch(self):
+        """ヘッダーに伸縮スペーサーを追加する。"""
+        self.header_layout.addStretch()
+
+    def add_content_widget(self, widget, stretch=0):
+        """本文にウィジェットを追加する。"""
+        self.content_layout.addWidget(widget, stretch)
+
+    def add_content_layout(self, layout):
+        """本文にレイアウトを追加する。"""
+        self.content_layout.addLayout(layout)
+
+    def is_expanded(self):
+        return self._expanded
+
+    def toggle(self):
+        self.set_expanded(not self._expanded)
+
+    def set_expanded(self, expanded):
+        self._expanded = bool(expanded)
+        self._apply_state()
+        self.toggled.emit(self._expanded)
+
+    def _apply_state(self):
+        # シグナルの再入を防ぐためボタン更新中は通知を止める
+        self.toggle_button.blockSignals(True)
+        self.toggle_button.setText("▼" if self._expanded else "▶")
+        self.toggle_button.blockSignals(False)
+        self.content.setVisible(self._expanded)
+
+
 class RightPanel(QWidget):
     """右側のパネル"""
     waypoint_delete_requested = Signal(int)  # 新しいシグナルを追加
@@ -3285,19 +3415,7 @@ class RightPanel(QWidget):
 
     def create_layer_panel(self):
         """レイヤーパネルを作成"""
-        widget = QWidget()
-        layout = QVBoxLayout(widget)
-        
-        title_label = QLabel("Layers")
-        title_label.setStyleSheet("""
-            QLabel {
-                font-size: 14px;
-                font-weight: bold;
-                padding: 5px;
-                background-color: #e0e0e0;
-                border-radius: 3px;
-            }
-        """)
+        section = CollapsibleSection("Layers")
         
         # スクロールエリアを追加
         scroll_area = QScrollArea()
@@ -3329,27 +3447,13 @@ class RightPanel(QWidget):
         scroll_area.setMinimumHeight(150)
         scroll_area.setMaximumHeight(200)
         
-        layout.addWidget(title_label)
-        layout.addWidget(scroll_area)
-        layout.setSpacing(5)
+        section.add_content_widget(scroll_area)
         
-        return widget
+        return section
 
     def create_inflation_panel(self):
         """障害物膨張(Nav2 global costmap)の設定パネルを作成"""
-        widget = QWidget()
-        layout = QVBoxLayout(widget)
-
-        title_label = QLabel("Obstacle Inflation (Nav2)")
-        title_label.setStyleSheet("""
-            QLabel {
-                font-size: 14px;
-                font-weight: bold;
-                padding: 5px;
-                background-color: #e0e0e0;
-                border-radius: 3px;
-            }
-        """)
+        section = CollapsibleSection("Obstacle Inflation (Nav2)")
 
         content = QWidget()
         content.setStyleSheet("""
@@ -3446,8 +3550,7 @@ class RightPanel(QWidget):
         reset_button.clicked.connect(self.reset_inflation_defaults)
         content_layout.addWidget(reset_button)
 
-        layout.addWidget(title_label)
-        layout.addWidget(content)
+        section.add_content_widget(content)
 
         # 変更をまとめて通知
         self.inflation_enable_cb.toggled.connect(self._emit_inflation_changed)
@@ -3460,7 +3563,7 @@ class RightPanel(QWidget):
         for spin, _label, _default in footprint_specs:
             spin.valueChanged.connect(self._update_inscribed_from_footprint)
 
-        return widget
+        return section
 
     @staticmethod
     def sirius_footprint_defaults():
@@ -3501,24 +3604,7 @@ class RightPanel(QWidget):
 
     def create_waypoint_panel(self):
         """ウェイポイントリストパネルを作成"""
-        widget = QWidget()
-        layout = QVBoxLayout(widget)
-        layout.setSpacing(5)
-        
-        # ヘッダー部分のレイアウト
-        header_layout = QHBoxLayout()
-        
-        # タイトル
-        title_label = QLabel("Waypoints")
-        title_label.setStyleSheet("""
-            QLabel {
-                font-size: 14px;
-                font-weight: bold;
-                padding: 5px;
-                background-color: #e0e0e0;
-                border-radius: 3px;
-            }
-        """)
+        section = CollapsibleSection("Waypoints")
         
         # パス生成ボタン（トグルボタンに変更）
         self.generate_path_button = QPushButton("Generate Path")
@@ -3576,11 +3662,10 @@ class RightPanel(QWidget):
         """)
         import_button.clicked.connect(self.handle_import_waypoints)
         
-        header_layout.addWidget(title_label)
-        header_layout.addWidget(import_button)  # インポートボタンを追加
-        header_layout.addStretch()
-        header_layout.addWidget(self.generate_path_button)
-        header_layout.addWidget(clear_button)
+        section.add_header_widget(import_button)  # インポートボタンを追加
+        section.add_header_stretch()
+        section.add_header_widget(self.generate_path_button)
+        section.add_header_widget(clear_button)
         
         # スクロールエリアの作成と設定を更新
         self.scroll_area = QScrollArea()  # インスタンス変数として保存
@@ -3613,28 +3698,13 @@ class RightPanel(QWidget):
         self.scroll_area.setMinimumHeight(150)
         self.scroll_area.setMaximumHeight(300)
         
-        layout.addLayout(header_layout)
-        layout.addWidget(self.scroll_area)
+        section.add_content_widget(self.scroll_area)
         
-        return widget
+        return section
 
     def create_landmark_panel(self):
         """ランドマークリストパネルを作成"""
-        widget = QWidget()
-        layout = QVBoxLayout(widget)
-        layout.setSpacing(5)
-
-        header_layout = QHBoxLayout()
-        title_label = QLabel("Landmarks")
-        title_label.setStyleSheet("""
-            QLabel {
-                font-size: 14px;
-                font-weight: bold;
-                padding: 5px;
-                background-color: #e0e0e0;
-                border-radius: 3px;
-            }
-        """)
+        section = CollapsibleSection("Landmarks")
 
         import_button = QPushButton("Import")
         import_button.setToolTip("Import Landmarks YAML/JSON")
@@ -3661,11 +3731,10 @@ class RightPanel(QWidget):
         """)
         clear_button.clicked.connect(self.all_landmarks_delete_requested.emit)
 
-        header_layout.addWidget(title_label)
-        header_layout.addWidget(import_button)
-        header_layout.addWidget(export_button)
-        header_layout.addStretch()
-        header_layout.addWidget(clear_button)
+        section.add_header_widget(import_button)
+        section.add_header_widget(export_button)
+        section.add_header_stretch()
+        section.add_header_widget(clear_button)
 
         self.landmark_scroll_area = QScrollArea()
         self.landmark_scroll_area.setWidgetResizable(True)
@@ -3691,27 +3760,13 @@ class RightPanel(QWidget):
         self.landmark_scroll_area.setMinimumHeight(120)
         self.landmark_scroll_area.setMaximumHeight(220)
 
-        layout.addLayout(header_layout)
-        layout.addWidget(self.landmark_scroll_area)
+        section.add_content_widget(self.landmark_scroll_area)
 
-        return widget
+        return section
 
     def create_export_panel(self):
         """エクスポートパネルを作成"""
-        widget = QWidget()
-        layout = QVBoxLayout(widget)
-        
-        # タイトル
-        title_label = QLabel("Export")  # タイトルを元に戻す
-        title_label.setStyleSheet("""
-            QLabel {
-                font-size: 14px;
-                font-weight: bold;
-                padding: 5px;
-                background-color: #e0e0e0;
-                border-radius: 3px;
-            }
-        """)
+        section = CollapsibleSection("Export")
         
         # コンテンツエリア
         content = QWidget()
@@ -3778,10 +3833,9 @@ class RightPanel(QWidget):
         content_layout.addLayout(button_layout)
         content_layout.addWidget(save_image_button)
         
-        layout.addWidget(title_label)
-        layout.addWidget(content)
+        section.add_content_widget(content)
         
-        return widget
+        return section
 
     def handle_import_waypoints(self):
         """Waypointのインポート処理"""
@@ -4911,13 +4965,6 @@ class FormatEditorPanel(QFrame):
                 background-color: #f5f5f5;
                 border-radius: 5px;
             }
-            QLabel {
-                font-size: 14px;
-                font-weight: bold;
-                padding: 5px;
-                background-color: #e0e0e0;
-                border-radius: 3px;
-            }
             QWidget#contentWidget {
                 background-color: white;
                 border: 1px solid #ccc;
@@ -4939,9 +4986,8 @@ class FormatEditorPanel(QFrame):
         layout.setSpacing(5)
         layout.setContentsMargins(10, 10, 10, 10)  # マージンを追加
         
-        # タイトル行（Format Editor + パラメータ解説ボタン）
-        title_row = QHBoxLayout()
-        title_label = QLabel("Format Editor")
+        # 折りたたみ可能なセクション（Format Editor + パラメータ解説ボタン）
+        self.section = CollapsibleSection("Format Editor")
         self.help_button = QPushButton("パラメータ解説")
         self.help_button.setCheckable(True)
         self.help_button.setStyleSheet("""
@@ -4956,9 +5002,8 @@ class FormatEditorPanel(QFrame):
             QPushButton:checked { background-color: #37474F; }
         """)
         self.help_button.toggled.connect(self.toggle_help)
-        title_row.addWidget(title_label)
-        title_row.addStretch()
-        title_row.addWidget(self.help_button)
+        self.section.add_header_stretch()
+        self.section.add_header_widget(self.help_button)
 
         # コンテンツエリア
         content_widget = QWidget()
@@ -5050,9 +5095,8 @@ class FormatEditorPanel(QFrame):
         content_layout.addWidget(self.editor)
         content_layout.addLayout(button_layout)
 
-        # メインレイアウトに要素を追加
-        layout.addLayout(title_row)
-        layout.addWidget(content_widget)
+        # セクション本文にコンテンツを追加
+        self.section.add_content_widget(content_widget)
 
         # デフォルトパラメータの解説（ボタンで開閉・既定は折りたたみ）
         self.help_box = QTextEdit()
@@ -5071,7 +5115,10 @@ class FormatEditorPanel(QFrame):
         """)
         self.help_box.setVerticalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAsNeeded)
         self.help_box.setVisible(False)  # 既定は折りたたみ
-        layout.addWidget(self.help_box)
+        self.section.add_content_widget(self.help_box)
+
+        # メインレイアウトにセクションを追加
+        layout.addWidget(self.section)
 
         # 初期フォーマットを表示
         self.show_current_format()
