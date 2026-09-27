@@ -7,7 +7,7 @@ from PySide6.QtWidgets import (QApplication, QMainWindow, QWidget, QVBoxLayout,
                               QHBoxLayout, QMenuBar, QMenu, QLabel, QPushButton,
                               QFileDialog, QScrollArea, QSplitter, QGesture, 
                               QPinchGesture, QSlider, QCheckBox, QFrame, QTextEdit,
-                              QMessageBox, QDialog, QLineEdit, QToolTip)
+                              QMessageBox, QDialog, QLineEdit, QToolTip, QComboBox)
 from PySide6.QtCore import Qt, QPoint, Signal, QEvent, QSize, QMimeData, QTimer, QRect, QRectF
 from PySide6.QtGui import (QPixmap, QImage, QWheelEvent, QPainter, QPen, QCursor,
                           QDrag, QColor, QPolygon)  # QDragをQtGuiからインポート
@@ -169,6 +169,8 @@ class DrawingMode(Enum):
     ERASER = 2
     WAYPOINT = 3
     LANDMARK = 4
+    COST_PEN = 5
+    COST_ERASER = 6
 
 class Waypoint:
     """ウェイポイントを管理するクラス"""
@@ -424,7 +426,13 @@ class DrawableLabel(QLabel):
             return
 
         # 現在のツールのサイズを取得
-        size = self.parent_viewer.pen_size if self.parent_viewer.drawing_mode == DrawingMode.PEN else self.parent_viewer.eraser_size
+        mode = self.parent_viewer.drawing_mode
+        if mode == DrawingMode.PEN:
+            size = self.parent_viewer.pen_size
+        elif mode in (DrawingMode.COST_PEN, DrawingMode.COST_ERASER):
+            size = self.parent_viewer.cost_pen_size
+        else:
+            size = self.parent_viewer.eraser_size
         scaled_size = int(size)  # pen_size/eraser_size は表示単位（ラベル上のピクセル）として扱う
             
         # サイズが変更された場合のみ新しいカーソルを作成
@@ -645,6 +653,9 @@ class DrawableLabel(QLabel):
                 self.click_pos = None
                 self.temp_waypoint = None
                 self.temp_landmark = None
+            # ペン/消しゴム/コスト編集のストロークを確定して履歴に残す
+            if self.parent_viewer:
+                self.parent_viewer.finish_stroke()
             self.last_pos = None
         elif self.edit_mode and (self.editing_waypoint or self.editing_landmark):
             self.is_editing_angle = False
@@ -775,6 +786,9 @@ class ImageViewer(QWidget):
         self.pen_color = Qt.GlobalColor.black
         self.pen_size = 2       # デフォルトのペンサイズ
         self.eraser_size = 10   # デフォルトの消しゴムサイズ
+        self.cost_pen_size = 10 # コストペン/消しゴムの太さ
+        self.cost_paint_class = None  # コストペンで塗るクラスID（Noneなら数値指定）
+        self.cost_paint_value = 100   # 数値指定時のコスト値(0-100)
         self.is_drawing = False  # 描画中フラグを追加
         self.current_drawing_points = []  # 現在の描画ストロークを保存
         
@@ -808,6 +822,7 @@ class ImageViewer(QWidget):
         # 基本レイヤーの作成とシグナル接続
         self.roadmap_layer = Layer("Road Map Layer")  # 路面マッピング色付き地図（SLAM地図の下）
         self.pgm_layer = Layer("PGM Layer")
+        self.costmap_layer = Layer("Cost Map Layer")  # .colored.json のコスト（global/local）可視化
         self.drawing_layer = Layer("Drawing Layer")
         self.waypoint_layer = Layer("Waypoint Layer")
         self.landmark_layer = Layer("Landmark Layer")
@@ -816,11 +831,12 @@ class ImageViewer(QWidget):
         self.layers = [
             self.roadmap_layer,   # 0. 路面マップ（最下層・オプション）
             self.pgm_layer,       # 1. PGM画像
-            self.drawing_layer,   # 2. ペンと消しゴムの描画
-            self.path_layer,      # 3. パス
-            self.waypoint_layer,  # 4. ウェイポイント
-            self.landmark_layer,  # 5. ランドマーク
-            self.origin_layer     # 6. 原点（最上層）
+            self.costmap_layer,   # 2. セマンティックコストマップ
+            self.drawing_layer,   # 3. ペンと消しゴムの描画
+            self.path_layer,      # 4. パス
+            self.waypoint_layer,  # 5. ウェイポイント
+            self.landmark_layer,  # 6. ランドマーク
+            self.origin_layer     # 7. 原点（最上層）
         ]
         self.active_layer = self.drawing_layer
         
@@ -837,6 +853,8 @@ class ImageViewer(QWidget):
         self.map_origin = None            # ベース地図のワールド原点 [x, y]（YAMLのorigin）
         self.roadmap_resolution = None    # 路面マップの解像度（colored.json）
         self.roadmap_origin = None        # 路面マップのワールド原点 [x, y]（colored.json）
+        self.costmap_values = None        # コスト値グリッド (QImage Grayscale8, 0-100)
+        self.costmap_labels = {}          # クラスID -> {name, color, cost}
         self.current_map_yaml_path = None
 
         # 各コンポーネントの設定
@@ -858,6 +876,11 @@ class ImageViewer(QWidget):
         self._is_drawing_stroke = False  # ストローク描画中フラグ
         self._edit_dragging = False      # WP/ランドマークのドラッグ中フラグ（ドラッグ中は高速描画）
         self._stroke_old_pixmap = None   # ストローク開始時のpixmap
+        self._stroke_old_pgm_pixmap = None  # 消しゴムでPGMを編集したストローク開始時のpixmap
+        self._stroke_touched_pgm = False    # このストロークでPGMレイヤーを編集したか
+        self._stroke_old_costmap_pixmap = None  # コスト編集ストローク開始時の表示pixmap
+        self._stroke_old_costmap_values = None  # コスト編集ストローク開始時の値グリッド
+        self._stroke_touched_costmap = False    # このストロークでコストマップを編集したか
         self._update_pending = False     # 更新待ちフラグ
         self._cached_result = None       # 合成結果キャッシュ
         self._cache_valid = False        # キャッシュ有効フラグ
@@ -1013,9 +1036,47 @@ class ImageViewer(QWidget):
         sliders_layout.addLayout(pen_slider_layout)
         sliders_layout.addLayout(eraser_slider_layout)
         
+        # コスト編集ツールのレイアウト
+        cost_layout = QHBoxLayout()
+        
+        self.cost_pen_button = QPushButton("コストペン")
+        self.cost_pen_button.setCheckable(True)
+        self.cost_pen_button.setToolTip("コストマップにコストを塗る（クラス色 or 数値）")
+        self.cost_pen_button.clicked.connect(lambda: self.set_drawing_mode(DrawingMode.COST_PEN))
+        
+        self.cost_eraser_button = QPushButton("コスト消しゴム")
+        self.cost_eraser_button.setCheckable(True)
+        self.cost_eraser_button.setToolTip("コストマップのコストを消す（default/手動とも）")
+        self.cost_eraser_button.clicked.connect(lambda: self.set_drawing_mode(DrawingMode.COST_ERASER))
+        
+        self.cost_class_combo = QComboBox()
+        self.cost_class_combo.addItem("数値指定", None)
+        self.cost_class_combo.currentIndexChanged.connect(self.set_cost_paint_class)
+        
+        self.cost_value_slider = QSlider(Qt.Orientation.Horizontal)
+        self.cost_value_slider.setRange(0, 100)
+        self.cost_value_slider.setValue(self.cost_paint_value)
+        self.cost_value_slider.setToolTip("数値指定で塗るコスト値 (0-100)")
+        self.cost_value_slider.valueChanged.connect(self.set_cost_paint_value)
+        
+        self.cost_size_slider = QSlider(Qt.Orientation.Horizontal)
+        self.cost_size_slider.setRange(5, 50)
+        self.cost_size_slider.setValue(self.cost_pen_size)
+        self.cost_size_slider.valueChanged.connect(self.set_cost_pen_size)
+        
+        cost_layout.addWidget(self.cost_pen_button)
+        cost_layout.addWidget(self.cost_eraser_button)
+        cost_layout.addWidget(QLabel("クラス:"))
+        cost_layout.addWidget(self.cost_class_combo, stretch=1)
+        cost_layout.addWidget(QLabel("コスト:"))
+        cost_layout.addWidget(self.cost_value_slider, stretch=1)
+        cost_layout.addWidget(QLabel("太さ:"))
+        cost_layout.addWidget(self.cost_size_slider, stretch=1)
+        
         # メインレイアウトに追加
         tools_layout.addLayout(buttons_layout)
         tools_layout.addLayout(sliders_layout)
+        tools_layout.addLayout(cost_layout)
         self.layout().insertLayout(0, tools_layout)
 
     def set_pen_size(self, size):
@@ -1030,6 +1091,48 @@ class ImageViewer(QWidget):
         if self.drawing_mode == DrawingMode.ERASER:
             self.pgm_display.updateCursor()
 
+    def set_cost_pen_size(self, size):
+        """コストペン/消しゴムの太さを設定"""
+        self.cost_pen_size = size
+        if self.drawing_mode in (DrawingMode.COST_PEN, DrawingMode.COST_ERASER):
+            self.pgm_display.updateCursor()
+
+    def set_cost_paint_class(self, index):
+        """コストペンで塗るクラスを設定（Noneなら数値指定）"""
+        self.cost_paint_class = self.cost_class_combo.itemData(index)
+        # クラス選択中は数値スライダーを無効化
+        self.cost_value_slider.setEnabled(self.cost_paint_class is None)
+
+    def set_cost_paint_value(self, value):
+        """数値指定で塗るコスト値を設定"""
+        self.cost_paint_value = value
+
+    def populate_cost_class_combo(self):
+        """読み込んだ .colored.json のラベルでクラス選択コンボを更新"""
+        self.cost_class_combo.blockSignals(True)
+        self.cost_class_combo.clear()
+        self.cost_class_combo.addItem("数値指定", None)
+        for class_id, info in sorted(self.costmap_labels.items()):
+            self.cost_class_combo.addItem(f"{class_id}: {info.get('name', '')}", class_id)
+        self.cost_class_combo.setCurrentIndex(0)
+        self.cost_class_combo.blockSignals(False)
+        self.cost_paint_class = None
+        self.cost_value_slider.setEnabled(True)
+
+    def _cost_heatmap_color(self, value):
+        """数値指定コスト用のヒートマップ色（緑→黄→赤、値が高いほど不透明）"""
+        v = max(0, min(100, int(value)))
+        if v <= 0:
+            return QColor(0, 0, 0, 0)
+        if v <= 50:
+            t = v / 50.0
+            r, g, b = int(255 * t), 200, 0
+        else:
+            t = (v - 50) / 50.0
+            r, g, b = 255, int(200 * (1.0 - t)), 0
+        alpha = max(60, int(round(v / 100.0 * 255)))
+        return QColor(r, g, b, alpha)
+
     def set_drawing_mode(self, mode):
         """描画モードの切り替え"""
         # 同じモードを選択した場合は描画モードを解除
@@ -1039,6 +1142,8 @@ class ImageViewer(QWidget):
             self.eraser_button.setChecked(False)
             self.waypoint_button.setChecked(False)
             self.landmark_button.setChecked(False)
+            self.cost_pen_button.setChecked(False)
+            self.cost_eraser_button.setChecked(False)
             self.pgm_display.set_drawing_mode(False)
             self.scroll_area.set_drawing_mode(False)
             return
@@ -1049,6 +1154,8 @@ class ImageViewer(QWidget):
         self.eraser_button.setChecked(mode == DrawingMode.ERASER)
         self.waypoint_button.setChecked(mode == DrawingMode.WAYPOINT)
         self.landmark_button.setChecked(mode == DrawingMode.LANDMARK)
+        self.cost_pen_button.setChecked(mode == DrawingMode.COST_PEN)
+        self.cost_eraser_button.setChecked(mode == DrawingMode.COST_ERASER)
         
         # ラベルの描画モードを設定
         self.pgm_display.set_drawing_mode(mode != DrawingMode.NONE)
@@ -1063,13 +1170,21 @@ class ImageViewer(QWidget):
 
     def draw_line(self, start_pos, end_pos):
         """2点間に線を描画"""
-        if not self.drawing_layer.pixmap or self.drawing_mode == DrawingMode.NONE:
+        if self.drawing_mode == DrawingMode.NONE:
+            return
+        if self.drawing_mode in (DrawingMode.COST_PEN, DrawingMode.COST_ERASER):
+            self._draw_cost_line(start_pos, end_pos)
+            return
+        if not self.drawing_layer.pixmap:
             return
 
         # ストローク開始時のみpixmapを保存（メモリ節約）
         if not self._is_drawing_stroke:
             self._is_drawing_stroke = True
             self._stroke_old_pixmap = self.drawing_layer.pixmap.copy()
+            self._stroke_old_pgm_pixmap = None
+            self._stroke_touched_pgm = False
+            self._stroke_touched_costmap = False
 
         # 開始/終了位置を画像ピクセル座標に変換
         start_img = self.display_to_image_coords(start_pos)
@@ -1088,20 +1203,150 @@ class ImageViewer(QWidget):
             scale_factor = 1.0
         scaled_pen_size = max(1, int(self.pen_size * scale_factor))
         scaled_eraser_size = max(1, int(self.eraser_size * scale_factor))
+        pen_style = (Qt.PenStyle.SolidLine, Qt.PenCapStyle.RoundCap, Qt.PenJoinStyle.RoundJoin)
 
-        painter = QPainter(self.drawing_layer.pixmap)
         if self.drawing_mode == DrawingMode.PEN:
-            painter.setPen(QPen(self.pen_color, scaled_pen_size, Qt.PenStyle.SolidLine, Qt.PenCapStyle.RoundCap, Qt.PenJoinStyle.RoundJoin))
+            painter = QPainter(self.drawing_layer.pixmap)
+            painter.setPen(QPen(self.pen_color, scaled_pen_size, *pen_style))
+            painter.drawLine(scaled_start, scaled_end)
+            painter.end()
         else:  # ERASER
-            # 消しゴムを白色に変更
-            painter.setPen(QPen(Qt.GlobalColor.white, scaled_eraser_size, Qt.PenStyle.SolidLine, Qt.PenCapStyle.RoundCap, Qt.PenJoinStyle.RoundJoin))
-
-        painter.drawLine(scaled_start, scaled_end)
-        painter.end()
+            # 消しゴムはPGM本体を白く編集する。色付き路面マップなど下のレイヤーは
+            # 白で塗りつぶさず残す（従来は描画レイヤーに白を乗せていたため隠れていた）。
+            if self.pgm_layer.pixmap is not None:
+                if not self._stroke_touched_pgm:
+                    self._stroke_old_pgm_pixmap = self.pgm_layer.pixmap.copy()
+                    self._stroke_touched_pgm = True
+                painter = QPainter(self.pgm_layer.pixmap)
+                painter.setPen(QPen(Qt.GlobalColor.white, scaled_eraser_size, *pen_style))
+                painter.drawLine(scaled_start, scaled_end)
+                painter.end()
+            # ペンで描いた線も消えるように描画レイヤーを透明化する
+            painter = QPainter(self.drawing_layer.pixmap)
+            painter.setCompositionMode(QPainter.CompositionMode.CompositionMode_Clear)
+            painter.setPen(QPen(Qt.GlobalColor.black, scaled_eraser_size, *pen_style))
+            painter.drawLine(scaled_start, scaled_end)
+            painter.end()
 
         # キャッシュを無効化
         self._cache_valid = False
         self.update_display()
+
+    def _base_to_costmap_coords(self, pos):
+        """ベース地図ピクセル座標をコストマップのピクセル座標へ変換する。
+
+        戻り値: (QPoint, scale)。scale はベース1pxあたりのコストマップpx数。
+        """
+        if not self.costmap_layer.pixmap:
+            return None
+        pm = self.costmap_layer.pixmap
+        if (self.roadmap_origin and self.roadmap_resolution
+                and self.map_origin and self.resolution and self.pgm_layer.pixmap):
+            base_h = self.pgm_layer.pixmap.height()
+            wx = self.map_origin[0] + pos.x() * self.resolution
+            wy = self.map_origin[1] + (base_h - pos.y()) * self.resolution
+            cx = (wx - self.roadmap_origin[0]) / self.roadmap_resolution
+            cy = pm.height() - (wy - self.roadmap_origin[1]) / self.roadmap_resolution
+            scale = self.resolution / self.roadmap_resolution if self.roadmap_resolution else 1.0
+            return QPoint(int(round(cx)), int(round(cy))), scale
+        # 位置合わせ情報が無い場合はベースサイズにフィットしている前提
+        if self.pgm_layer.pixmap and self.pgm_layer.pixmap.width():
+            scale = pm.width() / self.pgm_layer.pixmap.width()
+            return QPoint(int(round(pos.x() * scale)), int(round(pos.y() * scale))), scale
+        return pos, 1.0
+
+    def _draw_cost_line(self, start_pos, end_pos):
+        """コストマップにコストを塗る/消す。表示pixmapと値グリッドの両方を更新する。"""
+        if not self.costmap_layer.pixmap or self.costmap_values is None:
+            return
+
+        if not self._is_drawing_stroke:
+            self._is_drawing_stroke = True
+            self._stroke_old_pixmap = None
+            self._stroke_old_pgm_pixmap = None
+            self._stroke_touched_pgm = False
+            self._stroke_old_costmap_pixmap = self.costmap_layer.pixmap.copy()
+            self._stroke_old_costmap_values = self.costmap_values.copy()
+            self._stroke_touched_costmap = True
+
+        start = self._base_to_costmap_coords(start_pos)
+        end = self._base_to_costmap_coords(end_pos)
+        if start is None or end is None:
+            return
+        p_start, scale = start
+        p_end, _ = end
+        size = max(1, int(self.cost_pen_size * scale))
+        pen_style = (Qt.PenStyle.SolidLine, Qt.PenCapStyle.RoundCap, Qt.PenJoinStyle.RoundJoin)
+
+        if self.drawing_mode == DrawingMode.COST_ERASER:
+            # 表示レイヤーを透明化
+            painter = QPainter(self.costmap_layer.pixmap)
+            painter.setCompositionMode(QPainter.CompositionMode.CompositionMode_Clear)
+            painter.setPen(QPen(Qt.GlobalColor.black, size, *pen_style))
+            painter.drawLine(p_start, p_end)
+            painter.end()
+            # 値グリッドを0に
+            vp = QPainter(self.costmap_values)
+            vp.setCompositionMode(QPainter.CompositionMode.CompositionMode_Source)
+            vp.setPen(QPen(QColor(0, 0, 0), size, *pen_style))
+            vp.drawLine(p_start, p_end)
+            vp.end()
+        else:
+            if self.cost_paint_class is not None and self.cost_paint_class in self.costmap_labels:
+                info = self.costmap_labels[self.cost_paint_class]
+                color = info.get('color', (255, 0, 0))
+                value = int(info.get('cost', 100))
+                alpha = max(60, int(round(max(0, min(100, value)) / 100.0 * 255)))
+                paint_color = QColor(int(color[0]), int(color[1]), int(color[2]), alpha)
+            else:
+                value = self.cost_paint_value
+                paint_color = self._cost_heatmap_color(value)
+            painter = QPainter(self.costmap_layer.pixmap)
+            painter.setCompositionMode(QPainter.CompositionMode.CompositionMode_Source)
+            painter.setPen(QPen(paint_color, size, *pen_style))
+            painter.drawLine(p_start, p_end)
+            painter.end()
+            v = max(0, min(100, int(value)))
+            vp = QPainter(self.costmap_values)
+            vp.setCompositionMode(QPainter.CompositionMode.CompositionMode_Source)
+            vp.setPen(QPen(QColor(v, v, v), size, *pen_style))
+            vp.drawLine(p_start, p_end)
+            vp.end()
+
+        self._cache_valid = False
+        self.update_display()
+
+    def finish_stroke(self):
+        """ストローク終了時に1操作として履歴に記録する。"""
+        if not self._is_drawing_stroke:
+            return
+        if self._stroke_touched_costmap:
+            action = {
+                'type': 'cost_draw',
+                'old_costmap_pixmap': self._stroke_old_costmap_pixmap,
+                'new_costmap_pixmap': self.costmap_layer.pixmap.copy() if self.costmap_layer.pixmap else None,
+                'old_costmap_values': self._stroke_old_costmap_values,
+                'new_costmap_values': self.costmap_values.copy() if self.costmap_values is not None else None,
+            }
+            self.add_to_history(action)
+            self._stroke_touched_costmap = False
+            self._stroke_old_costmap_pixmap = None
+            self._stroke_old_costmap_values = None
+        elif self._stroke_old_pixmap is not None:
+            action = {
+                'type': 'draw',
+                'old_pixmap': self._stroke_old_pixmap,
+                'new_pixmap': self.drawing_layer.pixmap.copy()
+            }
+            # 消しゴムでPGMを編集した場合はPGMレイヤーの前後も履歴に残す
+            if self._stroke_touched_pgm and self._stroke_old_pgm_pixmap is not None:
+                action['old_pgm_pixmap'] = self._stroke_old_pgm_pixmap
+                action['new_pgm_pixmap'] = self.pgm_layer.pixmap.copy()
+            self.add_to_history(action)
+            self._stroke_old_pixmap = None
+            self._stroke_old_pgm_pixmap = None
+            self._stroke_touched_pgm = False
+        self._is_drawing_stroke = False
 
     def mousePressEvent(self, event):
         if self.drawing_mode != DrawingMode.NONE:
@@ -1122,15 +1367,7 @@ class ImageViewer(QWidget):
 
     def mouseReleaseEvent(self, event):
         if self.drawing_mode != DrawingMode.NONE:
-            # ストローク終了時に履歴を追加（1ストロークで1履歴）
-            if self._is_drawing_stroke and self._stroke_old_pixmap is not None:
-                self.add_to_history({
-                    'type': 'draw',
-                    'old_pixmap': self._stroke_old_pixmap,
-                    'new_pixmap': self.drawing_layer.pixmap.copy()
-                })
-                self._stroke_old_pixmap = None
-            self._is_drawing_stroke = False
+            self.finish_stroke()
             self.last_point = None
             event.accept()
         else:
@@ -1261,12 +1498,16 @@ class ImageViewer(QWidget):
         
         # 0. 路面マップレイヤーを描画（最下層・原点合わせ）
         if self.roadmap_layer.visible and self.roadmap_layer.pixmap:
-            self._draw_roadmap(painter, result.size())
+            self._draw_aligned_layer(painter, self.roadmap_layer, result.size())
 
         # 1. PGMレイヤーを描画
         if (self.pgm_layer.visible and self.pgm_layer.pixmap):
             painter.setOpacity(self.pgm_layer.opacity)
             painter.drawPixmap(0, 0, self.pgm_layer.pixmap)
+
+        # 1.5 セマンティックコストマップを描画（PGMの上、描画の下）
+        if self.costmap_layer.visible and self.costmap_layer.pixmap:
+            self._draw_aligned_layer(painter, self.costmap_layer, result.size())
 
         # 2. グリッドの描画
         if self.show_grid:
@@ -1778,6 +2019,24 @@ class ImageViewer(QWidget):
                 self.roadmap_resolution = None
                 self.roadmap_origin = None
 
+            # セマンティックコストマップ（.colored.json の labels[].global_cost/local_cost）
+            self.costmap_layer.pixmap = None
+            self.costmap_values = None
+            self.costmap_labels = {}
+            index_candidates = [stem + '.colored.pgm', stem + '.pgm']
+            index_path = next((p for p in index_candidates if os.path.exists(p)), None)
+            if index_path and meta and meta.get('labels'):
+                cost_data = self._build_costmap_data(index_path, meta)
+                if cost_data is not None:
+                    display_img, values_img, labels_info = cost_data
+                    self.costmap_values = values_img
+                    self.costmap_labels = labels_info
+                    if display_img is not None and not display_img.isNull():
+                        self.costmap_layer.pixmap = QPixmap.fromImage(display_img)
+                        self.costmap_layer.visible = True
+                    self.populate_cost_class_combo()
+                    print(f'Loaded cost map: {index_path} ({len(labels_info)} classes)')
+
             # 下レイヤーが見えるように SLAM 地図を半透明にする
             if self.pgm_layer.opacity > 0.7:
                 self.pgm_layer.set_opacity(0.6)
@@ -1819,12 +2078,81 @@ class ImageViewer(QWidget):
         # png/jpg はそのまま読み込み
         return QImage(image_path)
 
-    def _draw_roadmap(self, painter, target_size):
-        """路面マップをベース地図のピクセル座標へ原点合わせして描画する。"""
-        pm = self.roadmap_layer.pixmap
+    def _build_costmap_data(self, index_path, meta):
+        """`.colored.json` の labels からコストマップを生成する。
+
+        戻り値: (表示用QImage, コスト値QImage(Grayscale8), labels辞書) または None。
+        表示は各クラスに対応する色（labels[].color、無ければ palette）で塗り、
+        global_cost / local_cost の大きい方の値が高いほど不透明にする。
+        値グリッドは Nav2 raw モード用に 0-100 のコストを保持する
+        （unknown クラスは Nav2 の unknown を表す 255）。
+        """
+        try:
+            arr, width, height = read_pgm_file(index_path)
+            if arr is None:
+                return None
+            labels = meta.get('labels') if meta else None
+            if not labels:
+                return None
+            palette = meta.get('palette') if meta else None
+            rgba = np.zeros((height, width, 4), dtype=np.uint8)
+            values = np.zeros((height, width), dtype=np.uint8)
+            values[arr == 0] = 255  # unknown クラスは Nav2 の unknown
+            labels_info = {}
+            for key, info in labels.items():
+                try:
+                    idx = int(key)
+                except (TypeError, ValueError):
+                    continue
+                if idx < 0:
+                    continue
+                try:
+                    gcost = int(info.get('global_cost', 0) or 0)
+                except (TypeError, ValueError):
+                    gcost = 0
+                try:
+                    lcost = int(info.get('local_cost', 0) or 0)
+                except (TypeError, ValueError):
+                    lcost = 0
+                cost = max(gcost, lcost)
+                # クラスに対応する色（JSONの labels[].color、無ければ palette）
+                color = info.get('color')
+                if not (isinstance(color, (list, tuple)) and len(color) >= 3):
+                    if palette and 0 <= idx < len(palette):
+                        color = palette[idx]
+                    else:
+                        color = (255, 0, 0)
+                r = int(max(0, min(255, color[0])))
+                g = int(max(0, min(255, color[1])))
+                b = int(max(0, min(255, color[2])))
+                labels_info[idx] = {'name': info.get('name', ''), 'color': (r, g, b), 'cost': cost}
+                mask = arr == idx
+                if not mask.any():
+                    continue
+                if cost > 0:
+                    values[mask] = min(max(cost, 0), 100)
+                    alpha = int(round(min(max(cost, 0), 100) / 100.0 * 255))
+                    alpha = max(alpha, 60)  # 低コストでも視認できるよう下限を設ける
+                    rgba[mask] = (r, g, b, alpha)
+            display_img = None
+            if rgba[..., 3].any():
+                rgba = np.ascontiguousarray(rgba)
+                display_img = QImage(rgba.tobytes(), width, height, width * 4,
+                                     QImage.Format.Format_RGBA8888).copy()
+            values = np.ascontiguousarray(values)
+            values_img = QImage(values.tobytes(), width, height, width,
+                                QImage.Format.Format_Grayscale8).copy()
+            return display_img, values_img, labels_info
+        except Exception as e:
+            print(f'Error building cost map: {str(e)}')
+            return None
+
+    def _draw_aligned_layer(self, painter, layer, target_size):
+        """原点合わせ情報を使ってレイヤーをベース地図のピクセル座標へ描画する。"""
+        pm = layer.pixmap
         if pm is None or pm.isNull():
             return
-        painter.setOpacity(self.roadmap_layer.opacity)
+        painter.setOpacity(layer.opacity)
         if (self.roadmap_origin and self.roadmap_resolution
                 and self.map_origin and self.resolution and self.pgm_layer.pixmap):
             ox_b, oy_b = self.map_origin
@@ -1950,7 +2278,10 @@ class ImageViewer(QWidget):
         
         for layer in export_layers:
             if layer.visible and layer.pixmap:
-                painter.setOpacity(layer.opacity)
+                # エクスポートでは表示用の不透明度を使わない。
+                # 色付き路面マップ読み込み時にPGMが半透明化されるため、
+                # そのまま出力すると薄い地図になってしまう。
+                painter.setOpacity(1.0)
                 painter.drawPixmap(0, 0, layer.pixmap)
         
         painter.end()
@@ -2141,7 +2472,14 @@ class ImageViewer(QWidget):
             self.waypoint_edited.emit(waypoint)
         elif action['type'] == 'draw':
             # 描画レイヤーを以前の状態に戻す
-            self.drawing_layer.pixmap = action['old_pixmap']
+            self.drawing_layer.pixmap = action['old_pixmap'].copy()
+            if 'old_pgm_pixmap' in action:
+                self.pgm_layer.pixmap = action['old_pgm_pixmap'].copy()
+        elif action['type'] == 'cost_draw':
+            if action.get('old_costmap_pixmap') is not None:
+                self.costmap_layer.pixmap = action['old_costmap_pixmap'].copy()
+            if action.get('old_costmap_values') is not None:
+                self.costmap_values = action['old_costmap_values'].copy()
             
         self.update_display()
         self.history_changed.emit(self.can_undo(), self.can_redo())
@@ -2177,7 +2515,14 @@ class ImageViewer(QWidget):
             self.waypoint_edited.emit(waypoint)
         elif action['type'] == 'draw':
             # 描画レイヤーを新しい状態に進める
-            self.drawing_layer.pixmap = action['new_pixmap']
+            self.drawing_layer.pixmap = action['new_pixmap'].copy()
+            if 'new_pgm_pixmap' in action:
+                self.pgm_layer.pixmap = action['new_pgm_pixmap'].copy()
+        elif action['type'] == 'cost_draw':
+            if action.get('new_costmap_pixmap') is not None:
+                self.costmap_layer.pixmap = action['new_costmap_pixmap'].copy()
+            if action.get('new_costmap_values') is not None:
+                self.costmap_values = action['new_costmap_values'].copy()
             
         self.update_display()
         self.history_changed.emit(self.can_undo(), self.can_redo())
@@ -2453,6 +2798,7 @@ class RightPanel(QWidget):
     landmark_name_changed = Signal(int, str)
     landmark_import_requested = Signal(str)
     landmark_export_requested = Signal()
+    costmap_export_requested = Signal()
     
     def __init__(self):
         super().__init__()
@@ -2780,6 +3126,7 @@ class RightPanel(QWidget):
         self.export_pgm_cb = QCheckBox("Export PGM with drawings")
         self.export_waypoints_cb = QCheckBox("Export Waypoints YAML")
         self.export_landmarks_cb = QCheckBox("Export Landmarks YAML")
+        self.export_costmap_cb = QCheckBox("Export Cost Map (PGM+YAML, Nav2 raw)")
         
         # ボタンのレイアウト
         button_layout = QHBoxLayout()
@@ -2805,6 +3152,7 @@ class RightPanel(QWidget):
         content_layout.addWidget(self.export_pgm_cb)
         content_layout.addWidget(self.export_waypoints_cb)
         content_layout.addWidget(self.export_landmarks_cb)
+        content_layout.addWidget(self.export_costmap_cb)
         button_layout.addWidget(export_button)
         content_layout.addLayout(button_layout)
         
@@ -2840,10 +3188,13 @@ class RightPanel(QWidget):
         export_pgm = self.export_pgm_cb.isChecked()
         export_waypoints = self.export_waypoints_cb.isChecked()
         export_landmarks = self.export_landmarks_cb.isChecked()
+        export_costmap = self.export_costmap_cb.isChecked()
         if export_pgm or export_waypoints:
             self.export_requested.emit(export_pgm, export_waypoints)
         if export_landmarks:
             self.landmark_export_requested.emit()
+        if export_costmap:
+            self.costmap_export_requested.emit()
 
     # スクロールタイマーの設定用メソッドを追加
     def start_auto_scroll(self):
@@ -3485,6 +3836,7 @@ class MainWindow(QMainWindow):
         self.right_panel.landmark_name_changed.connect(self.handle_landmark_name_changed)
         self.right_panel.landmark_import_requested.connect(self.import_landmarks_file)
         self.right_panel.landmark_export_requested.connect(self.export_landmarks_file)
+        self.right_panel.costmap_export_requested.connect(self.export_costmap_file)
 
     def keyPressEvent(self, event):
         """F11で全画面切替、Escで全画面解除"""
@@ -3654,6 +4006,55 @@ class MainWindow(QMainWindow):
                         yaml.dump(yaml_data, f, default_flow_style=None)
                 except Exception as e:
                     QMessageBox.warning(self, "Error", f"Error saving YAML file: {str(e)}")
+
+    def export_costmap_file(self):
+        """編集したコストマップを Nav2 raw モードで使える PGM + YAML として保存する。
+
+        PGM の画素値はコスト 0-100（255 は unknown）。Nav2 の map_server に
+        `mode: raw` で読ませ、costmap の StaticLayer で中間コストとして扱える。
+        """
+        iv = self.image_viewer
+        if iv.costmap_values is None:
+            QMessageBox.information(
+                self, "Cost Map",
+                "コストマップがありません。先に色付き路面マップ(.colored.json)を読み込んでください。")
+            return
+        file_name, _ = QFileDialog.getSaveFileName(
+            self, "Export Cost Map (PGM)", "", "PGM Files (*.pgm);;All Files (*)")
+        if not file_name:
+            return
+        if not file_name.lower().endswith('.pgm'):
+            file_name += '.pgm'
+        if not iv.costmap_values.save(file_name, "PGM"):
+            QMessageBox.warning(self, "Error", f"Failed to save cost map: {file_name}")
+            return
+
+        yaml_file_name = os.path.splitext(file_name)[0] + '.yaml'
+        if iv.roadmap_resolution and iv.roadmap_origin:
+            resolution = iv.roadmap_resolution
+            origin = [iv.roadmap_origin[0], iv.roadmap_origin[1], 0.0]
+        else:
+            resolution = iv.resolution
+            origin = [0.0, 0.0, 0.0]
+            if iv.origin_point and iv.pgm_layer.pixmap:
+                origin_x = -iv.origin_point[0] * iv.resolution
+                origin_y = -(iv.pgm_layer.pixmap.height() - iv.origin_point[1]) * iv.resolution
+                origin = [origin_x, origin_y, 0.0]
+
+        yaml_data = {
+            'image': os.path.basename(file_name),
+            'mode': 'raw',
+            'resolution': resolution,
+            'origin': origin,
+            'negate': 0,
+            'occupied_thresh': 0.65,
+            'free_thresh': 0.196,
+        }
+        try:
+            with open(yaml_file_name, 'w') as f:
+                yaml.dump(yaml_data, f, default_flow_style=None)
+        except Exception as e:
+            QMessageBox.warning(self, "Error", f"Error saving YAML file: {str(e)}")
 
     def export_waypoints_yaml(self):
         """ウェイポイントをYAMLファイルとしてエクスポート"""
