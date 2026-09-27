@@ -7,8 +7,8 @@ from PySide6.QtWidgets import (QApplication, QMainWindow, QWidget, QVBoxLayout,
                               QHBoxLayout, QMenuBar, QMenu, QLabel, QPushButton,
                               QFileDialog, QScrollArea, QSplitter, QGesture, 
                               QPinchGesture, QSlider, QCheckBox, QFrame, QTextEdit,
-                              QMessageBox, QDialog, QLineEdit, QToolTip, QComboBox,
-                              QDoubleSpinBox, QGridLayout)
+                              QMessageBox, QDialog, QLineEdit, QToolTip,
+                              QDoubleSpinBox, QGridLayout, QComboBox)
 from PySide6.QtCore import Qt, QPoint, Signal, QEvent, QSize, QMimeData, QTimer, QRect, QRectF
 from PySide6.QtGui import (QPixmap, QImage, QWheelEvent, QPainter, QPen, QCursor,
                           QDrag, QColor, QPolygon)  # QDragをQtGuiからインポート
@@ -861,6 +861,7 @@ class ImageViewer(QWidget):
         self.roadmap_origin = None        # 路面マップのワールド原点 [x, y]（colored.json）
         self.costmap_values = None        # コスト値グリッド (QImage Grayscale8, 0-100)
         self.costmap_labels = {}          # クラスID -> {name, color, cost}
+        self._costmap_revision = 0        # コスト値グリッドの更新番号（計画キャッシュ判定用）
         self.current_map_yaml_path = None
 
         # 障害物膨張（Nav2 global_costmap の inflation_layer 相当）
@@ -880,6 +881,23 @@ class ImageViewer(QWidget):
         self._inflation_timer.setSingleShot(True)
         self._inflation_timer.setInterval(250)
         self._inflation_timer.timeout.connect(self.recompute_inflation)
+
+        # 路面マップ（.colored.pgm + .colored.json）のクラス別セマンティックコスト。
+        # 計画・表示の双方は costmap_values（手動ペン編集も反映される単一グリッド）を
+        # 唯一のソースとし、クラス別コスト表はそのグリッドを更新する。
+        self.roadmap_index_grid = None    # .colored.pgm のインデックス配列（原画像向き）
+        self.roadmap_labels = {}          # {class_id_str: {name, global_cost, local_cost}}
+        self.semantic_enabled = False     # セマンティックコストのON/OFF
+        self.semantic_classes = {}        # {name: {global_cost, local_cost}}
+        self.semantic_combine = 'max'     # 障害物膨張との合成方法: 'max' or 'add'
+        self._planning_cost = None        # パス計画用（膨張＋セマンティック）合成コスト
+        self._planning_cost_key = None
+        self._semantic_grid_cache = None  # 再サンプル済みセマンティックコスト(0-254)
+        self._semantic_grid_cache_key = None
+        self._semantic_timer = QTimer(self)
+        self._semantic_timer.setSingleShot(True)
+        self._semantic_timer.setInterval(200)
+        self._semantic_timer.timeout.connect(self.recompute_semantic_cost)
 
         # 各コンポーネントの設定
         self.setup_display()
@@ -1453,6 +1471,9 @@ class ImageViewer(QWidget):
             self._stroke_touched_costmap = False
             self._stroke_old_costmap_pixmap = None
             self._stroke_old_costmap_values = None
+            # 手動コスト編集を計画コストへ反映する
+            self._costmap_revision += 1
+            self._planning_cost_key = None
         elif self._stroke_old_pixmap is not None:
             action = {
                 'type': 'draw',
@@ -1468,6 +1489,7 @@ class ImageViewer(QWidget):
                 action['map_old'] = self._stroke_old_map[y0:y1, x0:x1].copy()
                 action['map_new'] = self.map_image_array[y0:y1, x0:x1].copy()
                 self._inflation_params_key = None
+                self._planning_cost_key = None
                 if self.inflation_enabled:
                     # 影響範囲だけ再計算するため、消した直後でも高速に反映される
                     self._update_inflation_region((x0, y0, x1, y1))
@@ -1494,6 +1516,10 @@ class ImageViewer(QWidget):
         self._inflation_rgba = None
         self._inflation_cost = None
         self._inflation_cost_key = None
+        # ベース地図が変わるとセマンティックコストの再サンプルが必要になる
+        self._costmap_revision += 1
+        self._planning_cost = None
+        self._planning_cost_key = None
         self.update_display()
         self.coord_label.show()  # 画像読み込み時に座標表示を有効化
         if self.inflation_enabled:
@@ -1507,6 +1533,7 @@ class ImageViewer(QWidget):
         self.inflation_cost_scaling = max(0.0, float(cost_scaling))
         self.inflation_inscribed_radius = max(0.0, float(inscribed))
         self.inflation_layer.opacity = max(0.0, min(1.0, float(opacity_percent) / 100.0))
+        self._planning_cost_key = None
 
         if not self.inflation_enabled:
             self._inflation_timer.stop()
@@ -1552,6 +1579,26 @@ class ImageViewer(QWidget):
         pixels = image.astype(np.float32) / 255.0
         occupied_prob = pixels if self.inflation_negate else (1.0 - pixels)
         return occupied_prob >= float(self.inflation_occupied_thresh)
+
+    def _semantic_lethal_mask(self):
+        """セマンティック（コストマップ）の致死セルを障害物扱いするマスクを返す。"""
+        if not self.semantic_enabled:
+            return None
+        semantic = self._build_semantic_cost_grid()
+        if semantic is None:
+            return None
+        return semantic >= 253
+
+    def _inflation_obstacle_mask(self, semantic_lethal=None):
+        """膨張計算の入力となる障害物マスク（PGM占有 or セマンティック致死）。"""
+        occupied = None
+        if self.map_image_array is not None:
+            occupied = self._occupied_mask(self.map_image_array)
+        if semantic_lethal is None:
+            semantic_lethal = self._semantic_lethal_mask()
+        if semantic_lethal is not None:
+            occupied = semantic_lethal if occupied is None else (occupied | semantic_lethal)
+        return occupied
 
     def _compute_inflation_cost(self, occupied, resolution, radius_m, cost_scaling, inscribed_m):
         """Nav2 inflation_layer と同じコスト値(0-254)を計算する。"""
@@ -1628,8 +1675,8 @@ class ImageViewer(QWidget):
             self._inflation_cost = None
             return None
         resolution = float(self.resolution) if self.resolution and self.resolution > 0 else 0.05
-        occupied = self._occupied_mask(image)
-        if not occupied.any():
+        occupied = self._inflation_obstacle_mask()
+        if occupied is None or not occupied.any():
             self._inflation_rgba = None
             self._inflation_cost = None
             return None
@@ -1654,17 +1701,269 @@ class ImageViewer(QWidget):
             round(float(self.inflation_inscribed_radius), 4),
             round(float(self.inflation_occupied_thresh), 4),
             int(self.inflation_negate),
+            # セマンティック致死セルも膨張源になるため、その更新もキーに含める
+            bool(self.semantic_enabled),
+            int(self._costmap_revision),
         )
 
+    def _semantic_cache_key(self):
+        """セマンティックコスト／合成コストのキャッシュ判定キー。"""
+        return (
+            int(self._costmap_revision),
+            None if self.roadmap_index_grid is None else self.roadmap_index_grid.shape,
+            None if self.map_image_array is None else self.map_image_array.shape,
+            round(float(self.resolution or 0.0), 6),
+            round(float(self.roadmap_resolution or 0.0), 6),
+            None if not self.map_origin else
+                (round(self.map_origin[0], 6), round(self.map_origin[1], 6)),
+            None if not self.roadmap_origin else
+                (round(self.roadmap_origin[0], 6), round(self.roadmap_origin[1], 6)),
+            tuple(sorted(
+                (str(name), int(spec.get('global_cost', 0)), int(spec.get('local_cost', 0)))
+                for name, spec in (self.semantic_classes or {}).items()
+            )),
+        )
+
+    @staticmethod
+    def _occ_to_cost(occ):
+        """OccupancyGrid値(0-100)をNav2コスト(0-254)へ変換する。100は致死。"""
+        occ = float(occ)
+        if occ <= 0.0:
+            return 0
+        if occ >= 100.0:
+            return 254
+        return int(np.clip(round(occ * 2.52), 1, 252))
+
+    def _semantic_index_cost_lut(self):
+        """labels から palette index -> コスト値(0-100) のLUTを作る。"""
+        labels = self.roadmap_labels or {}
+        if not labels:
+            return None
+        # 未知index（labelsに無いID）を誤って別クラスへ割り当てないよう、
+        # 実際に使われている最大indexまで確保し、未設定は0のまま残す。
+        max_index = 0
+        if self.roadmap_index_grid is not None and self.roadmap_index_grid.size:
+            max_index = max(max_index, int(self.roadmap_index_grid.max()))
+        for idx_str in labels:
+            try:
+                max_index = max(max_index, int(idx_str))
+            except (TypeError, ValueError):
+                continue
+        lut = np.zeros(max_index + 1, dtype=np.uint8)
+        for idx_str, info in labels.items():
+            try:
+                idx = int(idx_str)
+            except (TypeError, ValueError):
+                continue
+            if idx < 0 or idx >= lut.size:
+                continue
+            name = str(info.get('name', idx_str))
+            spec = (self.semantic_classes or {}).get(name)
+            if spec is None:
+                global_cost = int(info.get('global_cost', 0))
+                local_cost = int(info.get('local_cost', 0))
+            else:
+                global_cost = int(spec.get('global_cost', 0))
+                local_cost = int(spec.get('local_cost', 0))
+            # 単一の計画グリッドでは安全側に倒して大きい方を採用する。
+            lut[idx] = min(max(global_cost, local_cost), 100)
+        return lut
+
+    def _costmap_values_array(self):
+        """costmap_values (Grayscale8 QImage) を numpy 配列(0-100, 255=unknown)で返す。"""
+        image = self.costmap_values
+        if image is None or image.isNull():
+            return None
+        width = image.width()
+        height = image.height()
+        bytes_per_line = image.bytesPerLine()
+        buffer = np.frombuffer(image.constBits(), dtype=np.uint8)
+        if buffer.size < bytes_per_line * height:
+            return None
+        rows = buffer[:bytes_per_line * height].reshape(height, bytes_per_line)
+        return np.ascontiguousarray(rows[:, :width])
+
+    def _roadmap_array_to_cost(self, values):
+        """コスト値グリッド(0-100, 255=unknown)を計画コスト(0-254)へ変換する。"""
+        values = np.asarray(values, dtype=np.uint8)
+        cost = np.zeros(values.shape, dtype=np.uint8)
+        soft = (values > 0) & (values < 100)
+        if soft.any():
+            cost[soft] = np.clip(
+                np.round(values[soft].astype(np.float32) * 2.52), 1, 252
+            ).astype(np.uint8)
+        cost[values >= 100] = 254
+        cost[values == 255] = 0   # unknown は Nav2 の unknown（計画ではコストなし）
+        return cost
+
+    def _resample_roadmap_array(self, source):
+        """路面マップ格子の配列をベース地図グリッドへ最近傍で再サンプルする。"""
+        if source is None or self.map_image_array is None:
+            return None
+        if not (self.roadmap_origin and self.roadmap_resolution
+                and self.map_origin and self.resolution):
+            return None
+        h_r, w_r = source.shape
+        ox_b, oy_b = self.map_origin
+        r_b = float(self.resolution)
+        ox_r, oy_r = self.roadmap_origin
+        r_r = float(self.roadmap_resolution)
+        h_b, w_b = self.map_image_array.shape
+
+        # ベース画素中心のワールド座標（origin=左下, 画像row0=上）
+        xs = ox_b + (np.arange(w_b) + 0.5) * r_b
+        ys = oy_b + (h_b - np.arange(h_b) - 0.5) * r_b
+        rx = np.floor((xs[None, :] - ox_r) / r_r).astype(np.int64)
+        ry = (h_r - 1) - np.floor((ys[:, None] - oy_r) / r_r).astype(np.int64)
+        rx_full = np.broadcast_to(rx, (h_b, w_b))
+        ry_full = np.broadcast_to(ry, (h_b, w_b))
+        valid = (rx_full >= 0) & (rx_full < w_r) & (ry_full >= 0) & (ry_full < h_r)
+
+        grid = np.zeros((h_b, w_b), dtype=np.uint8)
+        if valid.any():
+            grid[valid] = source[ry_full[valid], rx_full[valid]]
+        return grid
+
+    def _build_semantic_cost_grid(self):
+        """計画用セマンティックコスト(0-254)をベース地図グリッドで返す。
+
+        手動ペン/消しゴム編集も反映される costmap_values を唯一のソースとする。
+        それが無い場合は .colored.json の labels から生成する。
+        膨張計算からも呼ばれるため、キーでキャッシュする。
+        """
+        key = self._semantic_cache_key()
+        if self._semantic_grid_cache is not None and self._semantic_grid_cache_key == key:
+            return self._semantic_grid_cache
+
+        values = self._costmap_values_array()
+        if values is not None:
+            grid = self._resample_roadmap_array(self._roadmap_array_to_cost(values))
+        else:
+            # フォールバック: labels + index（手動編集なし）から生成
+            index_grid = self.roadmap_index_grid
+            lut = self._semantic_index_cost_lut() if index_grid is not None else None
+            if index_grid is None or lut is None or lut.size == 0 or not lut.any():
+                grid = None
+            else:
+                idx = np.clip(index_grid.astype(np.int64), 0, lut.size - 1)
+                grid = self._resample_roadmap_array(self._roadmap_array_to_cost(lut[idx]))
+
+        self._semantic_grid_cache = grid
+        self._semantic_grid_cache_key = key
+        return grid
+
+    def _rebuild_costmap_from_classes(self):
+        """クラス別コスト表の値を costmap_values / costmap_layer に反映する。
+
+        costmap_values を再生成してから表示（costmap_layer）も更新する。
+        これ以降、手動ペン編集とクラス別コストは同じグリッドを共有する。
+        """
+        index_grid = self.roadmap_index_grid
+        labels = self.roadmap_labels or {}
+        lut = self._semantic_index_cost_lut()
+        if index_grid is None or lut is None:
+            return False
+
+        h, w = index_grid.shape
+        values = np.zeros((h, w), dtype=np.uint8)
+        values[index_grid == 0] = 255  # unknown
+        rgba = np.zeros((h, w, 4), dtype=np.uint8)
+
+        for idx_str, info in labels.items():
+            try:
+                idx = int(idx_str)
+            except (TypeError, ValueError):
+                continue
+            if idx <= 0 or idx >= lut.size:
+                continue
+            cost = int(lut[idx])
+            mask = index_grid == idx
+            if cost <= 0 or not mask.any():
+                continue
+            values[mask] = min(cost, 100)
+            color = (self.costmap_labels.get(idx) or {}).get('color')
+            if not (isinstance(color, (list, tuple)) and len(color) >= 3):
+                color = info.get('color') or (255, 0, 0)
+            r = int(max(0, min(255, color[0])))
+            g = int(max(0, min(255, color[1])))
+            b = int(max(0, min(255, color[2])))
+            alpha = max(int(round(min(cost, 100) / 100.0 * 255)), 60)
+            rgba[mask] = (r, g, b, alpha)
+
+        values = np.ascontiguousarray(values)
+        self.costmap_values = QImage(values.tobytes(), w, h, w,
+                                     QImage.Format.Format_Grayscale8).copy()
+        if rgba[..., 3].any():
+            rgba = np.ascontiguousarray(rgba)
+            display = QImage(rgba.tobytes(), w, h, w * 4,
+                             QImage.Format.Format_RGBA8888).copy()
+            self.costmap_layer.pixmap = QPixmap.fromImage(display)
+            self.costmap_layer.visible = True
+        else:
+            self.costmap_layer.pixmap = None
+        self._costmap_revision += 1
+        self._planning_cost_key = None
+        return True
+
+    def set_semantic_cost(self, enabled, classes, opacity_percent, combine='max'):
+        """RightPanelから路面マップのクラス別コスト設定を受け取る。"""
+        self.semantic_enabled = bool(enabled)
+        self.semantic_classes = dict(classes or {})
+        self.semantic_combine = combine if combine in ('max', 'add') else 'max'
+        self.costmap_layer.opacity = max(0.0, min(1.0, float(opacity_percent) / 100.0))
+        self._planning_cost_key = None
+        if not self.semantic_enabled:
+            self._semantic_timer.stop()
+            self.update_display()
+            self._refresh_inflation_for_semantic()
+            return
+        self._semantic_timer.start()
+
+    def _refresh_inflation_for_semantic(self):
+        """セマンティック変更で膨張の障害物マスクが変わるため再計算する。"""
+        self._inflation_params_key = None
+        self._inflation_cost_key = None
+        if self.inflation_enabled:
+            self._inflation_timer.start()
+
+    def recompute_semantic_cost(self):
+        """クラス別コスト表をコストマップへ反映し、表示と計画を更新する。"""
+        self._semantic_timer.stop()
+        if not self.semantic_enabled:
+            self.update_display()
+            return
+        QApplication.setOverrideCursor(Qt.CursorShape.WaitCursor)
+        try:
+            self._rebuild_costmap_from_classes()
+        except Exception as exc:  # 予期せぬデータでもアプリを落とさない
+            print(f"Semantic cost error: {exc}")
+            import traceback
+            traceback.print_exc()
+        finally:
+            QApplication.restoreOverrideCursor()
+        # セマンティック致死セルは膨張源なので、膨張オーバーレイも更新する
+        self._refresh_inflation_for_semantic()
+        self.update_display()
+
     def _ensure_cost_grid(self):
-        """パス計画用の膨張コストグリッド(0-254)を取得する（必要なら計算）。"""
+        """パス計画用コストグリッド(0-254)を取得する（障害物膨張＋セマンティック）。"""
         if self.map_image_array is None:
             return None
-        key = self._inflation_cache_key()
-        if self._inflation_cost is not None and self._inflation_cost_key == key:
-            return self._inflation_cost
+        key = (
+            self._inflation_cache_key(),
+            self._semantic_cache_key(),
+            self.semantic_enabled,
+            self.semantic_combine,
+        )
+        if self._planning_cost is not None and self._planning_cost_key == key:
+            return self._planning_cost
+
         resolution = float(self.resolution) if self.resolution and self.resolution > 0 else 0.05
+        # セマンティック致死セル（芝生・車道など）も膨張源として扱う。
+        semantic = self._build_semantic_cost_grid() if self.semantic_enabled else None
         occupied = self._occupied_mask(self.map_image_array)
+        if semantic is not None:
+            occupied = occupied | (semantic >= 253)
         radius_m = self.inflation_radius
         inscribed_m = min(self.inflation_inscribed_radius, radius_m)
         QApplication.setOverrideCursor(Qt.CursorShape.WaitCursor)
@@ -1672,10 +1971,17 @@ class ImageViewer(QWidget):
             cost = self._compute_inflation_cost(
                 occupied, resolution, radius_m, self.inflation_cost_scaling, inscribed_m
             )
+            if semantic is not None:
+                if self.semantic_combine == 'add':
+                    cost = np.clip(
+                        cost.astype(np.int32) + semantic.astype(np.int32), 0, 254
+                    ).astype(np.uint8)
+                else:
+                    cost = np.maximum(cost, semantic)
         finally:
             QApplication.restoreOverrideCursor()
-        self._inflation_cost = cost
-        self._inflation_cost_key = key
+        self._planning_cost = cost
+        self._planning_cost_key = key
         return cost
 
     def _update_inflation_region(self, bbox):
@@ -1702,6 +2008,9 @@ class ImageViewer(QWidget):
 
         sub_image = self.map_image_array[wy0:wy1, wx0:wx1]
         occupied = self._occupied_mask(sub_image)
+        semantic_lethal = self._semantic_lethal_mask()
+        if semantic_lethal is not None:
+            occupied = occupied | semantic_lethal[wy0:wy1, wx0:wx1]
         sub_cost = self._compute_inflation_cost(
             occupied, resolution, radius_m, self.inflation_cost_scaling, inscribed_m
         )
@@ -2237,8 +2546,11 @@ class ImageViewer(QWidget):
             if 'negate' in yaml_data:
                 self.inflation_negate = int(yaml_data['negate'])
             self._inflation_params_key = None
+            self._planning_cost_key = None
             if self.inflation_enabled:
                 self._inflation_timer.start()
+            if self.semantic_enabled:
+                self._semantic_timer.start()
                 
             # YAMLファイルから直接originとresolutionを読み取る
             if 'origin' in yaml_data:
@@ -2374,6 +2686,10 @@ class ImageViewer(QWidget):
                 with open(json_path, 'r') as f:
                     meta = json.load(f)
 
+            # セマンティックコスト用にクラス定義とインデックス配列を保持する
+            self.roadmap_labels = dict(meta.get('labels') or {}) if meta else {}
+            self.roadmap_index_grid = self._load_roadmap_index_grid(stem, image_path, meta)
+
             q_img = self._load_roadmap_image(image_path, meta)
             if q_img is None or q_img.isNull():
                 raise ValueError(f'failed to load road map image: {image_path}')
@@ -2410,14 +2726,36 @@ class ImageViewer(QWidget):
             if self.pgm_layer.opacity > 0.7:
                 self.pgm_layer.set_opacity(0.6)
 
+            # 原点合わせ情報が変わったのでセマンティックコストを再計算する
+            self._costmap_revision += 1
+            self._planning_cost = None
+            self._planning_cost_key = None
+            if self.semantic_enabled:
+                self._semantic_timer.start()
+
             print(f'Loaded road map: {image_path} size={q_img.width()}x{q_img.height()} '
-                  f'res={self.roadmap_resolution} origin={self.roadmap_origin}')
+                  f'res={self.roadmap_resolution} origin={self.roadmap_origin} '
+                  f'semantic_classes={len(self.roadmap_labels)}')
             self.update_display()
             self.layer_changed.emit()
         except Exception as e:
             print(f'Error loading road map: {str(e)}')
             import traceback
             traceback.print_exc()
+
+    def _load_roadmap_index_grid(self, stem, image_path, meta):
+        """セマンティックコスト計算用に .colored.pgm のインデックス配列を読み込む。"""
+        if not meta or not meta.get('labels'):
+            return None
+        candidates = [stem + '.colored.pgm']
+        if image_path and image_path.lower().endswith('.pgm'):
+            candidates.append(image_path)
+        for path in candidates:
+            if os.path.exists(path):
+                arr, width, height = read_pgm_file(path)
+                if arr is not None:
+                    return arr
+        return None
 
     def _load_roadmap_image(self, image_path, meta):
         """路面マップ画像を QImage に変換する（.colored.pgm は palette でRGB化）。"""
@@ -3216,6 +3554,8 @@ class ImageViewer(QWidget):
                 self.costmap_layer.pixmap = action['old_costmap_pixmap'].copy()
             if action.get('old_costmap_values') is not None:
                 self.costmap_values = action['old_costmap_values'].copy()
+            self._costmap_revision += 1
+            self._planning_cost_key = None
             
         self.update_display()
         self.history_changed.emit(self.can_undo(), self.can_redo())
@@ -3261,6 +3601,8 @@ class ImageViewer(QWidget):
                 self.costmap_layer.pixmap = action['new_costmap_pixmap'].copy()
             if action.get('new_costmap_values') is not None:
                 self.costmap_values = action['new_costmap_values'].copy()
+            self._costmap_revision += 1
+            self._planning_cost_key = None
             
         self.update_display()
         self.history_changed.emit(self.can_undo(), self.can_redo())
@@ -3275,6 +3617,7 @@ class ImageViewer(QWidget):
         self.map_image_array[y0:y1, x0:x1] = region
         self._refresh_pgm_pixmap_from_array()
         self._inflation_params_key = None
+        self._planning_cost_key = None
         if self.inflation_enabled:
             self._update_inflation_region((x0, y0, x1, y1))
 
@@ -3689,6 +4032,8 @@ class RightPanel(QWidget):
     map_image_requested = Signal()  # 地図全体の画像保存用シグナル
     # 障害物膨張(Nav2): (enabled, inflation_radius, cost_scaling_factor, inscribed_radius, opacity%)
     inflation_changed = Signal(bool, float, float, float, int)
+    # セマンティックコスト(路面マップ): (enabled, classes{dict}, opacity%, combine)
+    semantic_cost_changed = Signal(bool, object, int, str)
     
     def __init__(self):
         super().__init__()
@@ -3717,6 +4062,10 @@ class RightPanel(QWidget):
         # 障害物膨張パネルを追加
         self.inflation_widget = self.create_inflation_panel()
         layout.addWidget(self.inflation_widget)
+
+        # セマンティックコスト（路面マップ）パネルを追加
+        self.semantic_cost_widget = self.create_semantic_cost_panel()
+        layout.addWidget(self.semantic_cost_widget)
         
         # ウェイポイントリストパネルを追加
         self.waypoint_widget = self.create_waypoint_panel()
@@ -3926,6 +4275,175 @@ class RightPanel(QWidget):
         self.inflation_cost_scaling_spin.setValue(3.0)
         self.inflation_inscribed_spin.setValue(min(front, back, left, right))
         self.inflation_opacity_slider.setValue(20)
+
+    def create_semantic_cost_panel(self):
+        """路面マップ（.colored.json）のクラス別コスト設定パネルを作成する。"""
+        section = CollapsibleSection("Semantic Cost (Road Map)")
+
+        content = QWidget()
+        content.setStyleSheet("""
+            QWidget {
+                background-color: white;
+                border: 1px solid #ccc;
+                border-radius: 3px;
+                padding: 10px;
+            }
+        """)
+        content_layout = QVBoxLayout(content)
+
+        self.semantic_enable_cb = QCheckBox("Enable semantic cost (grass, tactile paving, ...)")
+        self.semantic_enable_cb.setChecked(False)
+        self.semantic_enable_cb.setToolTip(
+            "路面マップ .colored.json の labels(global_cost/local_cost) を\n"
+            "障害物膨張コストと合成してパス計画に反映します"
+        )
+        content_layout.addWidget(self.semantic_enable_cb)
+
+        self.semantic_hint_label = QLabel("路面マップ(.colored.json)を読み込むとクラスが表示されます")
+        self.semantic_hint_label.setStyleSheet("color:#888; font-size:11px;")
+        self.semantic_hint_label.setWordWrap(True)
+        content_layout.addWidget(self.semantic_hint_label)
+
+        combine_row = QHBoxLayout()
+        combine_row.addWidget(QLabel("Combine with inflation"))
+        self.semantic_combine_combo = QComboBox()
+        self.semantic_combine_combo.addItem("Max (推奨)", "max")
+        self.semantic_combine_combo.addItem("Add", "add")
+        combine_row.addWidget(self.semantic_combine_combo, stretch=1)
+        content_layout.addLayout(combine_row)
+
+        opacity_row = QHBoxLayout()
+        opacity_row.addWidget(QLabel("Opacity"))
+        self.semantic_opacity_slider = QSlider(Qt.Orientation.Horizontal)
+        self.semantic_opacity_slider.setRange(0, 100)
+        self.semantic_opacity_slider.setValue(35)
+        self.semantic_opacity_label = QLabel("35%")
+        self.semantic_opacity_label.setMinimumWidth(40)
+        self.semantic_opacity_slider.valueChanged.connect(
+            lambda value: self.semantic_opacity_label.setText(f"{value}%"))
+        opacity_row.addWidget(self.semantic_opacity_slider, stretch=1)
+        opacity_row.addWidget(self.semantic_opacity_label)
+        content_layout.addLayout(opacity_row)
+
+        # クラス別コスト表（Global=致死判定, Local=ソフトコスト）
+        self.semantic_class_container = QWidget()
+        self.semantic_class_layout = QGridLayout(self.semantic_class_container)
+        self.semantic_class_layout.setContentsMargins(0, 0, 0, 0)
+        self.semantic_class_layout.setHorizontalSpacing(8)
+        self.semantic_class_layout.setVerticalSpacing(4)
+        content_layout.addWidget(self.semantic_class_container)
+
+        self.semantic_class_rows = {}       # name -> (global_spin, local_spin)
+        self.semantic_class_defaults = {}   # name -> (global, local)
+
+        reset_button = QPushButton("Reset to road map defaults")
+        reset_button.clicked.connect(self.reset_semantic_defaults)
+        content_layout.addWidget(reset_button)
+
+        section.add_content_widget(content)
+
+        # 変更をまとめて通知
+        self.semantic_enable_cb.toggled.connect(self._emit_semantic_changed)
+        self.semantic_opacity_slider.valueChanged.connect(self._emit_semantic_changed)
+        self.semantic_combine_combo.currentIndexChanged.connect(self._emit_semantic_changed)
+
+        return section
+
+    @staticmethod
+    def _cost_spin():
+        spin = QDoubleSpinBox()
+        spin.setRange(0, 100)
+        spin.setSingleStep(5)
+        spin.setDecimals(0)
+        spin.setToolTip("0=コストなし, 100=LETHAL(通行不可)")
+        return spin
+
+    def set_semantic_classes(self, labels):
+        """読み込んだ .colored.json の labels からクラス別コスト表を再構築する。"""
+        while self.semantic_class_layout.count():
+            item = self.semantic_class_layout.takeAt(0)
+            widget = item.widget()
+            if widget is not None:
+                widget.deleteLater()
+        self.semantic_class_rows = {}
+        self.semantic_class_defaults = {}
+
+        # 予約クラス(unknown/wall/floor)は構造層で扱うため除外する
+        skip = {"unknown", "wall", "floor"}
+        rows = []
+        for idx_str, info in (labels or {}).items():
+            name = str(info.get("name", idx_str))
+            if name.lower() in skip:
+                continue
+            rows.append((name, info))
+        rows.sort(key=lambda item: (int(item[1].get("id", 999)), item[0]))
+
+        for column, text in enumerate(("Class", "ID", "Global", "Local")):
+            header = QLabel(text)
+            header.setStyleSheet("color:#888; font-size:11px;")
+            self.semantic_class_layout.addWidget(header, 0, column)
+
+        for row, (name, info) in enumerate(rows, start=1):
+            g_default = int(info.get("global_cost", 0))
+            l_default = int(info.get("local_cost", 0))
+            self.semantic_class_defaults[name] = (g_default, l_default)
+
+            name_label = QLabel(name)
+            name_label.setStyleSheet("font-size:11px;")
+            self.semantic_class_layout.addWidget(name_label, row, 0)
+
+            id_label = QLabel(str(info.get("id", "")))
+            id_label.setStyleSheet("font-size:11px; color:#888;")
+            self.semantic_class_layout.addWidget(id_label, row, 1)
+
+            g_spin = self._cost_spin()
+            g_spin.setValue(g_default)
+            g_spin.valueChanged.connect(self._emit_semantic_changed)
+            self.semantic_class_layout.addWidget(g_spin, row, 2)
+
+            l_spin = self._cost_spin()
+            l_spin.setValue(l_default)
+            l_spin.valueChanged.connect(self._emit_semantic_changed)
+            self.semantic_class_layout.addWidget(l_spin, row, 3)
+
+            self.semantic_class_rows[name] = (g_spin, l_spin)
+
+        if rows:
+            self.semantic_hint_label.setText(
+                f"{len(rows)} classes（100 = LETHAL / 通行不可）")
+        else:
+            self.semantic_hint_label.setText(
+                "路面マップ(.colored.json)を読み込むとクラスが表示されます")
+        self._emit_semantic_changed()
+
+    def _collect_semantic_classes(self):
+        classes = {}
+        for name, (g_spin, l_spin) in self.semantic_class_rows.items():
+            classes[name] = {
+                "global_cost": int(g_spin.value()),
+                "local_cost": int(l_spin.value()),
+            }
+        return classes
+
+    def _emit_semantic_changed(self, *args):
+        try:
+            combine = self.semantic_combine_combo.currentData() or "max"
+        except AttributeError:
+            combine = "max"
+        self.semantic_cost_changed.emit(
+            self.semantic_enable_cb.isChecked(),
+            self._collect_semantic_classes(),
+            int(self.semantic_opacity_slider.value()),
+            str(combine),
+        )
+
+    def reset_semantic_defaults(self):
+        """路面マップ .colored.json の global_cost/local_cost へ戻す。"""
+        for name, (g_spin, l_spin) in self.semantic_class_rows.items():
+            g_default, l_default = self.semantic_class_defaults.get(name, (0, 0))
+            g_spin.setValue(g_default)
+            l_spin.setValue(l_default)
+        self._emit_semantic_changed()
 
     def create_waypoint_panel(self):
         """ウェイポイントリストパネルを作成"""
@@ -4836,6 +5354,9 @@ class MainWindow(QMainWindow):
         # 障害物膨張(Nav2)設定の変更を接続
         self.right_panel.inflation_changed.connect(self.handle_inflation_changed)
 
+        # セマンティックコスト(路面マップ)設定の変更を接続
+        self.right_panel.semantic_cost_changed.connect(self.handle_semantic_cost_changed)
+
         # インポート時の処理を接続
         self.right_panel.waypoint_import_requested.connect(self.import_waypoints_yaml)
 
@@ -4907,6 +5428,9 @@ class MainWindow(QMainWindow):
     def load_roadmap_file(self, file_path):
         """路面マッピング色付き地図を読み込む（原点合わせはJSONのresolution/origin）"""
         self.image_viewer.load_roadmap_file(file_path)
+        # .colored.json の labels からセマンティックコスト表を再構築する
+        labels = getattr(self.image_viewer, 'roadmap_labels', {}) or {}
+        self.right_panel.set_semantic_classes(labels)
         self.update_layer_panel()
 
     def handle_zoom_value_changed(self, value):
@@ -4976,6 +5500,10 @@ class MainWindow(QMainWindow):
     def handle_inflation_changed(self, enabled, radius, cost_scaling, inscribed, opacity):
         """障害物膨張(Nav2)設定の変更をImageViewerへ反映する。"""
         self.image_viewer.set_inflation(enabled, radius, cost_scaling, inscribed, opacity)
+
+    def handle_semantic_cost_changed(self, enabled, classes, opacity, combine):
+        """路面マップのクラス別コスト設定をImageViewerへ反映する。"""
+        self.image_viewer.set_semantic_cost(enabled, classes, opacity, combine)
 
     def export_pgm_with_drawings(self):
         """描画込みのPGMファイルをエクスポート"""

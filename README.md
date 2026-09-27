@@ -29,6 +29,14 @@
 - 🎨 **マルチレイヤー管理**
   - 5階層レイヤー（ベース地図 / 描画 / パス / ウェイポイント / ランドマーク・原点）
   - レイヤーごとの表示/非表示切り替え、不透明度（0〜100%）調整
+- 🧭 **セマンティックコスト（路面マップ）**
+  - 路面マッピングの `.colored.pgm` + `.colored.json` を読み込み、`labels` の
+    `global_cost` / `local_cost` を芝生・点字ブロック等のクラス別コストとして付与
+  - コストマップを **コストペン/消しゴム**（クラス色 or 任意値）で手動編集（Undo/Redo対応）
+  - クラス別コスト表と手動編集は同一のコストマップを共有し、
+    障害物膨張（Nav2 inflation_layer 相当）と合成（Max / Add）してパス計画へ反映
+  - 致死コスト（100=LETHAL）のセマンティック領域は障害物と同様に **膨張**（青→赤）される
+  - クラスごとのコスト・合成方法・不透明度を右パネルから編集（100 = LETHAL）
 - 💾 **柔軟なエクスポート & インポート**
   - Waypoint / Landmark の YAML 形式エクスポートおよびインポート
   - フォーマットエディタによる出力 YAML 構造のカスタマイズ
@@ -115,6 +123,37 @@ pyinstaller WaypointEditor.spec --clean --noconfirm
 - **Export Waypoints**: 配置したウェイポイント群を YAML ファイルとして保存します。
 - **Export Map**: 描画レイヤーを合成した最新の PGM 画像ファイルと、原点情報などを含んだ YAML ファイルを一括保存します。
 - **Export Landmarks**: ランドマーク情報を YAML ファイルとして保存します。
+
+### Step 7: セマンティックコスト（芝生・点字ブロック等）
+路面マッピングの色付き地図（`.colored.pgm` + `.colored.json`）を読み込むと、
+右パネルに **Semantic Cost (Road Map)** が表示されます。
+
+1. **Select Road Map** で `.colored.pgm`（または `.colored.json` / `.color.png`）を選択します。
+   - `.colored.json` の `labels`（class 名 / `global_cost` / `local_cost`）からコストマップが生成され、
+     右パネル（Semantic Cost）の表に並びます。
+2. **Enable semantic cost** をオンにすると、クラス別コストを計画へ反映します。
+   - 表示は **Layers** パネルの `Cost Map Layer`（COST_PEN/COST_ERASER で編集可能）で確認できます。
+3. **Global / Local** の値を編集します（0 = コストなし、100 = LETHAL = 通行不可）。
+   - 既定は `grass` = global 100（通行不可）、`tactile paving` = local 50（ソフトコスト）など。
+   - 単一の計画グリッドでは安全側に倒して `max(global, local)` を採用します。
+   - 編集すると `Cost Map Layer`（コストマップ）が同じ値で再生成されます。
+4. **コストペン/消しゴム**（ツールバー）で個別セルを手動修正できます。
+   - クラス色（ドロップダウン）か任意のコスト値（0-100）を塗れます。
+   - 手動編集は同じコストマップに保存され、**パス計画にも直接反映**されます（Undo/Redo対応）。
+   - クラス別コストを変更するとマップは再生成され、手動編集はいったんリセットされます。
+5. **Combine with inflation** で障害物膨張との合成方法を選びます。
+   - `Max`（推奨）: 膨張コストとセマンティックコストの大きい方を採用。
+   - `Add`: 両者を加算（上限254）。
+   - 致死コスト（100=LETHAL）のセマンティック領域（芝生・車道など）は
+     障害物と同様に膨張源となり、周囲に青→赤の膨張コストが生成されます
+     （膨張オーバーレイを表示するには `Obstacle Inflation` をONにしてください）。
+6. **Generate Path** でパスを生成すると、芝生（LETHAL）を避け、点字ブロック
+   （ソフトコスト）は許容しつつコストの低い経路が選ばれます。
+7. **Opacity** でコストマップの不透明度、**Reset to road map defaults** で
+   `.colored.json` の値に戻せます。
+
+> 補足: `.colored.json` に `labels`（コスト）が無い旧形式の地図では、
+> 表示のみでセマンティックコストは付与できません。
 
 ---
 
