@@ -7,7 +7,8 @@ from PySide6.QtWidgets import (QApplication, QMainWindow, QWidget, QVBoxLayout,
                               QHBoxLayout, QMenuBar, QMenu, QLabel, QPushButton,
                               QFileDialog, QScrollArea, QSplitter, QGesture, 
                               QPinchGesture, QSlider, QCheckBox, QFrame, QTextEdit,
-                              QMessageBox, QDialog, QLineEdit, QToolTip, QComboBox)
+                              QMessageBox, QDialog, QLineEdit, QToolTip, QComboBox,
+                              QDoubleSpinBox, QGridLayout)
 from PySide6.QtCore import Qt, QPoint, Signal, QEvent, QSize, QMimeData, QTimer, QRect, QRectF
 from PySide6.QtGui import (QPixmap, QImage, QWheelEvent, QPainter, QPen, QCursor,
                           QDrag, QColor, QPolygon)  # QDragをQtGuiからインポート
@@ -653,9 +654,12 @@ class DrawableLabel(QLabel):
                 self.click_pos = None
                 self.temp_waypoint = None
                 self.temp_landmark = None
-            # ペン/消しゴム/コスト編集のストロークを確定して履歴に残す
-            if self.parent_viewer:
-                self.parent_viewer.finish_stroke()
+            elif (self.parent_viewer
+                    and self.parent_viewer.drawing_mode in (
+                        DrawingMode.PEN, DrawingMode.ERASER,
+                        DrawingMode.COST_PEN, DrawingMode.COST_ERASER)):
+                # ペン/消しゴム/コスト編集の1ストロークを確定（履歴・地図同期・膨張更新）
+                self.parent_viewer.finish_drawing_stroke()
             self.last_pos = None
         elif self.edit_mode and (self.editing_waypoint or self.editing_landmark):
             self.is_editing_angle = False
@@ -828,6 +832,8 @@ class ImageViewer(QWidget):
         self.landmark_layer = Layer("Landmark Layer")
         self.origin_layer = Layer("Origin Layer")
         self.path_layer = Layer("Path Layer")
+        self.inflation_layer = Layer("Inflation Layer")  # 障害物膨張（Nav2 global costmap相当）
+        self.inflation_layer.opacity = 0.2
         self.layers = [
             self.roadmap_layer,   # 0. 路面マップ（最下層・オプション）
             self.pgm_layer,       # 1. PGM画像
@@ -857,6 +863,24 @@ class ImageViewer(QWidget):
         self.costmap_labels = {}          # クラスID -> {name, color, cost}
         self.current_map_yaml_path = None
 
+        # 障害物膨張（Nav2 global_costmap の inflation_layer 相当）
+        # デフォルト値はシリウスの params/nav2_params.yaml (global_costmap) と同じ。
+        self.map_image_array = None           # ベースPGMのグレースケール配列
+        self.inflation_enabled = False        # 膨張表示のオン/オフ
+        self.inflation_radius = 0.75          # inflation_radius [m]
+        self.inflation_cost_scaling = 3.0     # cost_scaling_factor
+        self.inflation_inscribed_radius = 0.35  # 内接半径 [m]（フットプリント由来）
+        self.inflation_occupied_thresh = 0.65  # ROS map YAML の occupied_thresh
+        self.inflation_negate = 0              # ROS map YAML の negate
+        self._inflation_params_key = None
+        self._inflation_rgba = None            # 膨張オーバーレイのRGBAキャッシュ（局所更新用）
+        self._inflation_cost = None            # 膨張コストグリッド(0-254)（パス計画用）
+        self._inflation_cost_key = None
+        self._inflation_timer = QTimer(self)
+        self._inflation_timer.setSingleShot(True)
+        self._inflation_timer.setInterval(250)
+        self._inflation_timer.timeout.connect(self.recompute_inflation)
+
         # 各コンポーネントの設定
         self.setup_display()
         self.setup_scroll_area()
@@ -881,6 +905,8 @@ class ImageViewer(QWidget):
         self._stroke_old_costmap_pixmap = None  # コスト編集ストローク開始時の表示pixmap
         self._stroke_old_costmap_values = None  # コスト編集ストローク開始時の値グリッド
         self._stroke_touched_costmap = False    # このストロークでコストマップを編集したか
+        self._stroke_old_map = None      # 消しゴム用: ストローク開始時の地図配列
+        self._stroke_erase_bbox = None   # 消しゴム用: 消去した範囲 [x0, y0, x1, y1]
         self._update_pending = False     # 更新待ちフラグ
         self._cached_result = None       # 合成結果キャッシュ
         self._cache_valid = False        # キャッシュ有効フラグ
@@ -1185,6 +1211,10 @@ class ImageViewer(QWidget):
             self._stroke_old_pgm_pixmap = None
             self._stroke_touched_pgm = False
             self._stroke_touched_costmap = False
+            self._stroke_erase_bbox = None
+            if self.drawing_mode == DrawingMode.ERASER and self.map_image_array is not None:
+                # 消しゴムは地図（障害物）を実際に消すため、元の地図配列を退避する
+                self._stroke_old_map = self.map_image_array.copy()
 
         # 開始/終了位置を画像ピクセル座標に変換
         start_img = self.display_to_image_coords(start_pos)
@@ -1211,22 +1241,23 @@ class ImageViewer(QWidget):
             painter.drawLine(scaled_start, scaled_end)
             painter.end()
         else:  # ERASER
-            # 消しゴムはPGM本体を白く編集する。色付き路面マップなど下のレイヤーは
-            # 白で塗りつぶさず残す（従来は描画レイヤーに白を乗せていたため隠れていた）。
-            if self.pgm_layer.pixmap is not None:
-                if not self._stroke_touched_pgm:
-                    self._stroke_old_pgm_pixmap = self.pgm_layer.pixmap.copy()
-                    self._stroke_touched_pgm = True
-                painter = QPainter(self.pgm_layer.pixmap)
-                painter.setPen(QPen(Qt.GlobalColor.white, scaled_eraser_size, *pen_style))
-                painter.drawLine(scaled_start, scaled_end)
-                painter.end()
-            # ペンで描いた線も消えるように描画レイヤーを透明化する
+            # 描画レイヤーはペン跡を透明に消す
             painter = QPainter(self.drawing_layer.pixmap)
             painter.setCompositionMode(QPainter.CompositionMode.CompositionMode_Clear)
             painter.setPen(QPen(Qt.GlobalColor.black, scaled_eraser_size, *pen_style))
             painter.drawLine(scaled_start, scaled_end)
             painter.end()
+
+            # ベース地図の障害物を自由空間(白)に置き換える（コストマップ/膨張に反映）
+            if self.pgm_layer.pixmap is not None:
+                if not self._stroke_touched_pgm:
+                    self._stroke_old_pgm_pixmap = self.pgm_layer.pixmap.copy()
+                    self._stroke_touched_pgm = True
+                map_painter = QPainter(self.pgm_layer.pixmap)
+                map_painter.setPen(QPen(Qt.GlobalColor.white, scaled_eraser_size, *pen_style))
+                map_painter.drawLine(scaled_start, scaled_end)
+                map_painter.end()
+                self._extend_erase_bbox(scaled_start, scaled_end, scaled_eraser_size)
 
         # キャッシュを無効化
         self._cache_valid = False
@@ -1316,37 +1347,66 @@ class ImageViewer(QWidget):
         self._cache_valid = False
         self.update_display()
 
-    def finish_stroke(self):
-        """ストローク終了時に1操作として履歴に記録する。"""
-        if not self._is_drawing_stroke:
+    def _extend_erase_bbox(self, start, end, size):
+        """消しゴムで消した範囲を記録する（履歴・配列同期用）"""
+        if self.pgm_layer.pixmap is None:
             return
-        if self._stroke_touched_costmap:
-            action = {
-                'type': 'cost_draw',
-                'old_costmap_pixmap': self._stroke_old_costmap_pixmap,
-                'new_costmap_pixmap': self.costmap_layer.pixmap.copy() if self.costmap_layer.pixmap else None,
-                'old_costmap_values': self._stroke_old_costmap_values,
-                'new_costmap_values': self.costmap_values.copy() if self.costmap_values is not None else None,
-            }
-            self.add_to_history(action)
-            self._stroke_touched_costmap = False
-            self._stroke_old_costmap_pixmap = None
-            self._stroke_old_costmap_values = None
-        elif self._stroke_old_pixmap is not None:
-            action = {
-                'type': 'draw',
-                'old_pixmap': self._stroke_old_pixmap,
-                'new_pixmap': self.drawing_layer.pixmap.copy()
-            }
-            # 消しゴムでPGMを編集した場合はPGMレイヤーの前後も履歴に残す
-            if self._stroke_touched_pgm and self._stroke_old_pgm_pixmap is not None:
-                action['old_pgm_pixmap'] = self._stroke_old_pgm_pixmap
-                action['new_pgm_pixmap'] = self.pgm_layer.pixmap.copy()
-            self.add_to_history(action)
-            self._stroke_old_pixmap = None
-            self._stroke_old_pgm_pixmap = None
-            self._stroke_touched_pgm = False
-        self._is_drawing_stroke = False
+        half = size // 2 + 2
+        width = self.pgm_layer.pixmap.width()
+        height = self.pgm_layer.pixmap.height()
+        x0 = max(0, min(start.x(), end.x()) - half)
+        y0 = max(0, min(start.y(), end.y()) - half)
+        x1 = min(width, max(start.x(), end.x()) + half)
+        y1 = min(height, max(start.y(), end.y()) + half)
+        if self._stroke_erase_bbox is None:
+            self._stroke_erase_bbox = [x0, y0, x1, y1]
+        else:
+            b = self._stroke_erase_bbox
+            b[0] = min(b[0], x0)
+            b[1] = min(b[1], y0)
+            b[2] = max(b[2], x1)
+            b[3] = max(b[3], y1)
+
+    def _sync_map_array_region(self, bbox):
+        """ベース地図ピクスマップの指定領域だけを計算用の地図配列へ反映する（高速）。"""
+        if self.map_image_array is None or self.pgm_layer.pixmap is None:
+            return
+        x0, y0, x1, y1 = bbox
+        width = x1 - x0
+        height = y1 - y0
+        if width <= 0 or height <= 0:
+            return
+        sub = self.pgm_layer.pixmap.copy(x0, y0, width, height).toImage().convertToFormat(
+            QImage.Format.Format_Grayscale8)
+        bytes_per_line = sub.bytesPerLine()
+        buffer = np.frombuffer(sub.constBits(), dtype=np.uint8)
+        if buffer.size < bytes_per_line * height:
+            return
+        rows = buffer[:bytes_per_line * height].reshape(height, bytes_per_line)[:, :width]
+        self.map_image_array[y0:y1, x0:x1] = rows
+
+    def _sync_map_array_from_pixmap(self):
+        """ベース地図ピクスマップの内容を計算用の地図配列へ反映する。"""
+        if self.map_image_array is None or self.pgm_layer.pixmap is None:
+            return
+        image = self.pgm_layer.pixmap.toImage().convertToFormat(QImage.Format.Format_Grayscale8)
+        width = image.width()
+        height = image.height()
+        bytes_per_line = image.bytesPerLine()
+        buffer = np.frombuffer(image.constBits(), dtype=np.uint8)
+        if buffer.size < bytes_per_line * height:
+            return
+        rows = buffer[:bytes_per_line * height].reshape(height, bytes_per_line)
+        self.map_image_array = np.ascontiguousarray(rows[:, :width]).copy()
+
+    def _refresh_pgm_pixmap_from_array(self):
+        """計算用の地図配列からベース地図ピクスマップを再生成する（Undo/Redo用）。"""
+        array = self.map_image_array
+        if array is None:
+            return
+        height, width = array.shape
+        q_img = QImage(array.data, width, height, width, QImage.Format.Format_Grayscale8)
+        self.pgm_layer.pixmap = QPixmap.fromImage(q_img)
 
     def mousePressEvent(self, event):
         if self.drawing_mode != DrawingMode.NONE:
@@ -1367,11 +1427,57 @@ class ImageViewer(QWidget):
 
     def mouseReleaseEvent(self, event):
         if self.drawing_mode != DrawingMode.NONE:
-            self.finish_stroke()
-            self.last_point = None
+            self.finish_drawing_stroke()
             event.accept()
         else:
             super().mouseReleaseEvent(event)
+
+    def finish_drawing_stroke(self):
+        """描画/消しゴム/コスト編集の1ストロークを確定する。
+
+        DrawableLabel側でマウスイベントを処理しているため、ストローク終了時は
+        ここを呼び出して履歴保存・地図同期・膨張の再計算を行う。
+        """
+        if not self._is_drawing_stroke:
+            self.last_point = None
+            return
+        if self._stroke_touched_costmap:
+            action = {
+                'type': 'cost_draw',
+                'old_costmap_pixmap': self._stroke_old_costmap_pixmap,
+                'new_costmap_pixmap': self.costmap_layer.pixmap.copy() if self.costmap_layer.pixmap else None,
+                'old_costmap_values': self._stroke_old_costmap_values,
+                'new_costmap_values': self.costmap_values.copy() if self.costmap_values is not None else None,
+            }
+            self.add_to_history(action)
+            self._stroke_touched_costmap = False
+            self._stroke_old_costmap_pixmap = None
+            self._stroke_old_costmap_values = None
+        elif self._stroke_old_pixmap is not None:
+            action = {
+                'type': 'draw',
+                'old_pixmap': self._stroke_old_pixmap,
+                'new_pixmap': self.drawing_layer.pixmap.copy()
+            }
+            # 消しゴムは地図の障害物も消しているため、変更範囲を履歴に残す
+            if (self.drawing_mode == DrawingMode.ERASER and self._stroke_old_map is not None
+                    and self._stroke_erase_bbox is not None):
+                x0, y0, x1, y1 = self._stroke_erase_bbox
+                self._sync_map_array_region((x0, y0, x1, y1))
+                action['map_bbox'] = (x0, y0, x1, y1)
+                action['map_old'] = self._stroke_old_map[y0:y1, x0:x1].copy()
+                action['map_new'] = self.map_image_array[y0:y1, x0:x1].copy()
+                self._inflation_params_key = None
+                if self.inflation_enabled:
+                    # 影響範囲だけ再計算するため、消した直後でも高速に反映される
+                    self._update_inflation_region((x0, y0, x1, y1))
+            self.add_to_history(action)
+            self._stroke_old_pixmap = None
+            self._stroke_old_map = None
+            self._stroke_erase_bbox = None
+        self._is_drawing_stroke = False
+        self.last_point = None
+        self.update_display()
 
     def load_image(self, img_array, width, height):
         """PGM画像データを読み込んでPGMレイヤーに設定"""
@@ -1381,8 +1487,245 @@ class ImageViewer(QWidget):
         self.pgm_layer.pixmap = QPixmap.fromImage(q_img)
         self.drawing_layer.pixmap = QPixmap(self.pgm_layer.pixmap.size())
         self.drawing_layer.pixmap.fill(Qt.GlobalColor.transparent)
+        # 障害物膨張の計算用にグレースケール配列を保持する
+        self.map_image_array = np.ascontiguousarray(img_array, dtype=np.uint8).copy()
+        self.inflation_layer.pixmap = None
+        self._inflation_params_key = None
+        self._inflation_rgba = None
+        self._inflation_cost = None
+        self._inflation_cost_key = None
         self.update_display()
         self.coord_label.show()  # 画像読み込み時に座標表示を有効化
+        if self.inflation_enabled:
+            # YAMLのresolution等が設定された後に再計算されるようデバウンスする
+            self._inflation_timer.start()
+
+    def set_inflation(self, enabled, radius, cost_scaling, inscribed, opacity_percent):
+        """RightPanelから膨張設定を受け取り、必要なら再計算する。"""
+        self.inflation_enabled = bool(enabled)
+        self.inflation_radius = max(0.0, float(radius))
+        self.inflation_cost_scaling = max(0.0, float(cost_scaling))
+        self.inflation_inscribed_radius = max(0.0, float(inscribed))
+        self.inflation_layer.opacity = max(0.0, min(1.0, float(opacity_percent) / 100.0))
+
+        if not self.inflation_enabled:
+            self._inflation_timer.stop()
+            self.inflation_layer.pixmap = None
+            self.update_display()
+            return
+
+        new_key = (
+            round(self.inflation_radius, 4),
+            round(self.inflation_cost_scaling, 4),
+            round(self.inflation_inscribed_radius, 4),
+            round(float(self.resolution or 0.0), 6),
+            None if self.map_image_array is None else self.map_image_array.shape,
+        )
+        if self.inflation_layer.pixmap is not None and new_key == self._inflation_params_key:
+            # パラメータが同じ（不透明度のみ変更）なら再計算せず再描画のみ
+            self.update_display()
+            return
+        self._inflation_params_key = new_key
+        self._inflation_timer.start()
+
+    def recompute_inflation(self):
+        """Nav2のinflation_layer相当の膨張マップを生成する。"""
+        self._inflation_timer.stop()
+        if not self.inflation_enabled or self.map_image_array is None:
+            self.inflation_layer.pixmap = None
+            self.update_display()
+            return
+        QApplication.setOverrideCursor(Qt.CursorShape.WaitCursor)
+        try:
+            self.inflation_layer.pixmap = self._build_inflation_pixmap()
+        except Exception as exc:  # 予期せぬデータでもアプリを落とさない
+            print(f"Inflation error: {exc}")
+            import traceback
+            traceback.print_exc()
+            self.inflation_layer.pixmap = None
+        finally:
+            QApplication.restoreOverrideCursor()
+        self.update_display()
+
+    def _occupied_mask(self, image):
+        """ROS map規約(negate対応)で占有セルのマスクを作る。"""
+        pixels = image.astype(np.float32) / 255.0
+        occupied_prob = pixels if self.inflation_negate else (1.0 - pixels)
+        return occupied_prob >= float(self.inflation_occupied_thresh)
+
+    def _compute_inflation_cost(self, occupied, resolution, radius_m, cost_scaling, inscribed_m):
+        """Nav2 inflation_layer と同じコスト値(0-254)を計算する。"""
+        height, width = occupied.shape
+        max_cells = int(np.ceil(radius_m / resolution)) if radius_m > 0 else 0
+
+        # 水平方向の距離（同一行内の最近傍障害物までのセル数）を厳密に求める
+        inf = np.float32(np.inf)
+        idx = np.arange(width, dtype=np.float32)
+        left_src = np.where(occupied, idx, np.float32(-1.0))
+        nearest_left = np.maximum.accumulate(left_src, axis=1)
+        right_src = np.where(occupied, idx, np.float32(width))
+        nearest_right = np.minimum.accumulate(right_src[:, ::-1], axis=1)[:, ::-1]
+        d_left = np.where(nearest_left >= 0.0, idx - nearest_left, inf)
+        d_right = np.where(nearest_right < width, nearest_right - idx, inf)
+        horizontal = np.minimum(d_left, d_right).astype(np.float32)
+
+        # 2Dユークリッド距離変換（分離可能）。膨張半径分だけ走査すれば十分。
+        if max_cells > 0:
+            padded = np.full((height + 2 * max_cells, width), inf, dtype=np.float32)
+            padded[max_cells:max_cells + height, :] = horizontal
+            dist_sq = np.full((height, width), inf, dtype=np.float32)
+            for dy in range(-max_cells, max_cells + 1):
+                block = padded[max_cells + dy:max_cells + dy + height, :]
+                np.minimum(dist_sq, block * block + np.float32(dy * dy), out=dist_sq)
+            dist_cells = np.sqrt(dist_sq)
+        else:
+            dist_cells = horizontal
+
+        dist_m = dist_cells * resolution
+
+        # Nav2 inflation_layer と同じコスト計算
+        cost = np.zeros((height, width), dtype=np.uint8)
+        inflated = (~occupied) & (dist_m <= radius_m)
+        if inflated.any():
+            if cost_scaling > 0.0:
+                decay = np.exp(-cost_scaling * (dist_m[inflated] - inscribed_m))
+            else:
+                decay = np.ones(int(inflated.sum()), dtype=np.float32)
+            cost[inflated] = np.clip((decay * 252.0).astype(np.int32), 1, 252).astype(np.uint8)
+        cost[(~occupied) & (dist_m <= inscribed_m)] = 253
+        cost[occupied] = 254
+        return cost
+
+    def _cost_to_rgba(self, cost):
+        """RVizのcostmap配色でコスト値をRGBAへ変換する。"""
+        height, width = cost.shape
+        #   1-252(膨張): 青(低コスト/外側) -> 赤(高コスト/障害物付近)
+        #   253(内接): シアン, 254(致死): 紫
+        rgba = np.zeros((height, width, 4), dtype=np.uint8)
+        inflated_mask = (cost >= 1) & (cost <= 252)
+        if inflated_mask.any():
+            v = (255.0 * cost[inflated_mask].astype(np.float32) / 252.0).astype(np.uint8)
+            rgba[inflated_mask, 0] = v
+            rgba[inflated_mask, 1] = 0
+            rgba[inflated_mask, 2] = (255 - v).astype(np.uint8)
+            rgba[inflated_mask, 3] = 255
+        rgba[cost == 253] = (0, 255, 255, 255)   # 内接: シアン
+        rgba[cost == 254] = (255, 0, 255, 255)   # 致死: 紫
+        return rgba
+
+    @staticmethod
+    def _rgba_to_pixmap(rgba):
+        height, width = rgba.shape[:2]
+        buffer = np.ascontiguousarray(rgba).tobytes()
+        q_img = QImage(buffer, width, height, 4 * width, QImage.Format.Format_RGBA8888)
+        return QPixmap.fromImage(q_img)
+
+    def _build_inflation_pixmap(self):
+        """地図全体の膨張オーバーレイを計算し、コスト/RGBAキャッシュも更新する。"""
+        image = self.map_image_array
+        if image is None or image.ndim != 2:
+            self._inflation_rgba = None
+            self._inflation_cost = None
+            return None
+        resolution = float(self.resolution) if self.resolution and self.resolution > 0 else 0.05
+        occupied = self._occupied_mask(image)
+        if not occupied.any():
+            self._inflation_rgba = None
+            self._inflation_cost = None
+            return None
+        radius_m = self.inflation_radius
+        inscribed_m = min(self.inflation_inscribed_radius, radius_m)
+        cost = self._compute_inflation_cost(
+            occupied, resolution, radius_m, self.inflation_cost_scaling, inscribed_m
+        )
+        self._inflation_cost = cost
+        self._inflation_cost_key = self._inflation_cache_key()
+        rgba = self._cost_to_rgba(cost)
+        self._inflation_rgba = rgba
+        return self._rgba_to_pixmap(rgba)
+
+    def _inflation_cache_key(self):
+        """膨張コストのキャッシュが有効かを判定するためのキー。"""
+        return (
+            None if self.map_image_array is None else self.map_image_array.shape,
+            round(float(self.resolution or 0.0), 6),
+            round(float(self.inflation_radius), 4),
+            round(float(self.inflation_cost_scaling), 4),
+            round(float(self.inflation_inscribed_radius), 4),
+            round(float(self.inflation_occupied_thresh), 4),
+            int(self.inflation_negate),
+        )
+
+    def _ensure_cost_grid(self):
+        """パス計画用の膨張コストグリッド(0-254)を取得する（必要なら計算）。"""
+        if self.map_image_array is None:
+            return None
+        key = self._inflation_cache_key()
+        if self._inflation_cost is not None and self._inflation_cost_key == key:
+            return self._inflation_cost
+        resolution = float(self.resolution) if self.resolution and self.resolution > 0 else 0.05
+        occupied = self._occupied_mask(self.map_image_array)
+        radius_m = self.inflation_radius
+        inscribed_m = min(self.inflation_inscribed_radius, radius_m)
+        QApplication.setOverrideCursor(Qt.CursorShape.WaitCursor)
+        try:
+            cost = self._compute_inflation_cost(
+                occupied, resolution, radius_m, self.inflation_cost_scaling, inscribed_m
+            )
+        finally:
+            QApplication.restoreOverrideCursor()
+        self._inflation_cost = cost
+        self._inflation_cost_key = key
+        return cost
+
+    def _update_inflation_region(self, bbox):
+        """消去などで変化した局所領域だけ膨張オーバーレイを再計算する。
+
+        膨張の影響は半径ぶん広がるため、更新領域を半径で外側に広げて計算し、
+        境界誤差が出ない内側部分だけをキャッシュとピクスマップへ反映する。
+        """
+        if self.map_image_array is None:
+            return
+        resolution = float(self.resolution) if self.resolution and self.resolution > 0 else 0.05
+        radius_m = self.inflation_radius
+        inscribed_m = min(self.inflation_inscribed_radius, radius_m)
+        r_cells = int(np.ceil(radius_m / resolution)) if radius_m > 0 else 0
+        height, width = self.map_image_array.shape
+
+        x0, y0, x1, y1 = bbox
+        ix0 = max(0, x0 - r_cells); iy0 = max(0, y0 - r_cells)
+        ix1 = min(width, x1 + r_cells); iy1 = min(height, y1 + r_cells)
+        wx0 = max(0, ix0 - r_cells); wy0 = max(0, iy0 - r_cells)
+        wx1 = min(width, ix1 + r_cells); wy1 = min(height, iy1 + r_cells)
+        if wx1 <= wx0 or wy1 <= wy0:
+            return
+
+        sub_image = self.map_image_array[wy0:wy1, wx0:wx1]
+        occupied = self._occupied_mask(sub_image)
+        sub_cost = self._compute_inflation_cost(
+            occupied, resolution, radius_m, self.inflation_cost_scaling, inscribed_m
+        )
+        inner_cost = sub_cost[iy0 - wy0:iy1 - wy0, ix0 - wx0:ix1 - wx0]
+
+        if self._inflation_rgba is None or self._inflation_rgba.shape != (height, width, 4):
+            # キャッシュが無い場合は全体を計算し直す
+            self.inflation_layer.pixmap = self._build_inflation_pixmap()
+            return
+
+        self._inflation_rgba[iy0:iy1, ix0:ix1] = self._cost_to_rgba(inner_cost)
+        if self._inflation_cost is not None and self._inflation_cost.shape == (height, width):
+            self._inflation_cost[iy0:iy1, ix0:ix1] = inner_cost
+        if self.inflation_layer.pixmap is None:
+            self.inflation_layer.pixmap = self._rgba_to_pixmap(self._inflation_rgba)
+        else:
+            inner_rgba = np.ascontiguousarray(self._inflation_rgba[iy0:iy1, ix0:ix1])
+            inner_bytes = inner_rgba.tobytes()
+            q_img = QImage(inner_bytes, ix1 - ix0, iy1 - iy0,
+                           4 * (ix1 - ix0), QImage.Format.Format_RGBA8888)
+            painter = QPainter(self.inflation_layer.pixmap)
+            painter.setCompositionMode(QPainter.CompositionMode.CompositionMode_Source)
+            painter.drawImage(ix0, iy0, q_img)
+            painter.end()
 
     def zoom_in(self):
         self.scale_factor *= 1.2
@@ -1485,10 +1828,14 @@ class ImageViewer(QWidget):
         self.update_display()
         self.landmark_edited.emit(landmark)
 
-    def update_display(self):
-        """複数レイヤーを合成して表示"""
+    def render_composite_pixmap(self):
+        """全レイヤーを実寸（元地図サイズ）で合成したピクスマップを生成する。
+
+        表示と画像保存（地図全体の写真）で共用する。地図・路面マッピング・
+        描画・パス・ウェイポイント・ランドマーク・原点を含む。
+        """
         if not self.pgm_layer.pixmap:
-            return
+            return None
 
         # 合成用の新しいピクスマップを作成
         result = QPixmap(self.pgm_layer.pixmap.size())
@@ -1508,6 +1855,12 @@ class ImageViewer(QWidget):
         # 1.5 セマンティックコストマップを描画（PGMの上、描画の下）
         if self.costmap_layer.visible and self.costmap_layer.pixmap:
             self._draw_aligned_layer(painter, self.costmap_layer, result.size())
+
+        # 1b. 障害物膨張レイヤー（Nav2 global costmap相当・赤=致死/内接、青=膨張）
+        if (self.inflation_enabled and self.inflation_layer.visible
+                and self.inflation_layer.pixmap):
+            painter.setOpacity(self.inflation_layer.opacity)
+            painter.drawPixmap(0, 0, self.inflation_layer.pixmap)
 
         # 2. グリッドの描画
         if self.show_grid:
@@ -1669,6 +2022,13 @@ class ImageViewer(QWidget):
             painter.drawPixmap(0, 0, self.origin_layer.pixmap)
         
         painter.end()
+        return result
+
+    def update_display(self):
+        """複数レイヤーを合成して表示"""
+        result = self.render_composite_pixmap()
+        if result is None:
+            return
 
         # スケーリングして表示（巨大画像の場合はFastTransformationを使用）
         new_size = QSize(
@@ -1870,6 +2230,15 @@ class ImageViewer(QWidget):
                 yaml_data = yaml.safe_load(f)
 
             self.current_map_yaml_path = file_path
+
+            # 障害物膨張の占有判定に使うROS map YAMLの閾値を反映する
+            if 'occupied_thresh' in yaml_data:
+                self.inflation_occupied_thresh = float(yaml_data['occupied_thresh'])
+            if 'negate' in yaml_data:
+                self.inflation_negate = int(yaml_data['negate'])
+            self._inflation_params_key = None
+            if self.inflation_enabled:
+                self._inflation_timer.start()
                 
             # YAMLファイルから直接originとresolutionを読み取る
             if 'origin' in yaml_data:
@@ -2176,7 +2545,7 @@ class ImageViewer(QWidget):
                 pm, QRectF(0, 0, pm.width(), pm.height()))
 
     def generate_path(self):
-        """ウェイポイント間のパスを生成または非表示"""
+        """ウェイポイント間のパスを生成または非表示（Nav2同様、膨張コスト上でA*探索）"""
         if self.waypoints and len(self.waypoints) >= 2:
             if not self.path_layer.pixmap or self.path_layer.pixmap.size() != self.pgm_layer.pixmap.size():
                 self.path_layer.pixmap = QPixmap(self.pgm_layer.pixmap.size())
@@ -2191,23 +2560,388 @@ class ImageViewer(QWidget):
                 
             if parent and parent.right_panel.generate_path_button.isChecked():
                 if self.waypoints and len(self.waypoints) >= 2:
+                    cost = self._ensure_cost_grid()
+                    points = self._plan_waypoint_path(cost)
+
                     painter = QPainter(self.path_layer.pixmap)
                     painter.setRenderHint(QPainter.RenderHint.Antialiasing)
-                    
+
                     # パスのスタイル設定
-                    pen = QPen(Qt.GlobalColor.green, 3)  # 青色、太さ3
+                    pen = QPen(Qt.GlobalColor.green, 3)
                     pen.setStyle(Qt.PenStyle.SolidLine)
                     painter.setPen(pen)
-                    
-                    # ウェイポイントを順番に接続
-                    for i in range(len(self.waypoints) - 1):
-                        start = self.waypoints[i]
-                        end = self.waypoints[i + 1]
-                        painter.drawLine(start.pixel_x, start.pixel_y, end.pixel_x, end.pixel_y)
-                    
+
+                    for i in range(len(points) - 1):
+                        painter.drawLine(points[i][0], points[i][1], points[i + 1][0], points[i + 1][1])
+
                     painter.end()
 
             self.update_display()
+
+    def _plan_waypoint_path(self, cost):
+        """ウェイポイント間を膨張コスト上でA*計画し、描画用の点列を返す。"""
+        points = []
+        for i in range(len(self.waypoints) - 1):
+            start = (self.waypoints[i].pixel_x, self.waypoints[i].pixel_y)
+            goal = (self.waypoints[i + 1].pixel_x, self.waypoints[i + 1].pixel_y)
+            segment = self._plan_segment(cost, start, goal) if cost is not None else None
+            if not segment:
+                segment = [start, goal]
+            if points:
+                segment = segment[1:]
+            points.extend(segment)
+        return points
+
+    def _plan_segment(self, cost, start, goal):
+        """1区間をNav2 NavFn同様に計画する（ポテンシャル場＋勾配降下＋SimpleSmoother）。"""
+        height, width = cost.shape
+        sx, sy = int(start[0]), int(start[1])
+        gx, gy = int(goal[0]), int(goal[1])
+        sx = min(max(sx, 0), width - 1); sy = min(max(sy, 0), height - 1)
+        gx = min(max(gx, 0), width - 1); gy = min(max(gy, 0), height - 1)
+        if (sx, sy) == (gx, gy):
+            return [(sx, sy)]
+
+        # 探索窓（ウェイポイント近傍のみ探索して高速化）。見つからなければ広げる。
+        base_margin = max(64, int(np.hypot(gx - sx, gy - sy) * 0.5))
+        for margin in (base_margin, base_margin * 3, max(width, height)):
+            x0 = max(0, min(sx, gx) - margin)
+            x1 = min(width, max(sx, gx) + margin + 1)
+            y0 = max(0, min(sy, gy) - margin)
+            y1 = min(height, max(sy, gy) + margin + 1)
+            window = cost[y0:y1, x0:x1]
+
+            # 巨大な窓はダウンサンプルして探索量を抑える（障害物は最大値で保持）
+            area = window.shape[0] * window.shape[1]
+            step = 1
+            if area > 250000:
+                step = int(np.ceil(np.sqrt(area / 250000.0)))
+
+            if step > 1:
+                grid, cstart, cgoal = self._downsample_window(
+                    window, (sx - x0, sy - y0), (gx - x0, gy - y0), step)
+            else:
+                grid = window
+                cstart = (sx - x0, sy - y0)
+                cgoal = (gx - x0, gy - y0)
+
+            # NavFn: ゴールからのポテンシャル場を計算し、勾配降下で経路抽出
+            path = self._navfn_path(grid, cstart, cgoal)
+            if path is None:
+                # 勾配降下が失敗した場合はA*の親チェーンへフォールバック
+                raw = self._astar_window(grid, cstart, cgoal)
+                if raw is None:
+                    continue
+                path = [(float(px), float(py)) for px, py in raw]
+
+            if step > 1:
+                full = [(x0 + px * step + step // 2, y0 + py * step + step // 2)
+                        for px, py in path]
+            else:
+                full = [(x0 + px, y0 + py) for px, py in path]
+            full[0] = (sx, sy)
+            full[-1] = (gx, gy)
+
+            # Nav2 SimpleSmoother相当で平滑化（障害物へ食い込む場合は元パスを使う）
+            smoothed = self._simple_smooth(full, cost)
+            return smoothed if self._path_is_free(smoothed, cost) else full
+        return None
+
+    def _navfn_path(self, grid, start, goal):
+        """NavFn同様、ゴールからのポテンシャル場を勾配降下して経路を得る。"""
+        potential = self._astar_potential(grid, goal)
+        return self._gradient_path(potential, start, goal)
+
+    def _astar_potential(self, grid, goal):
+        """ゴールからのポテンシャル（コスト）場をA*(g+ヒューリスティック)で計算する。"""
+        import heapq
+
+        h, w = grid.shape
+        gx = min(max(int(goal[0]), 0), w - 1)
+        gy = min(max(int(goal[1]), 0), h - 1)
+        blocked = grid >= 253
+        blocked[gy, gx] = False
+
+        cost_neutral = 50.0
+        cost_factor = 0.8
+        step_cost = (cost_neutral + grid.astype(np.float32) * cost_factor).astype(np.float32)
+        ys, xs = np.mgrid[0:h, 0:w]
+        heuristic = (np.hypot(xs - gx, ys - gy) * cost_neutral).astype(np.float32)
+
+        n = h * w
+        pot = np.full(n, np.float32(1.0e10), dtype=np.float32)
+        closed = np.zeros(n, dtype=bool)
+        gidx = gy * w + gx
+        pot[gidx] = 0.0
+        heap = [(0.0, gidx)]
+        neighbors = ((-1, -1, 1.41421356), (-1, 0, 1.0), (-1, 1, 1.41421356),
+                     (0, -1, 1.0), (0, 1, 1.0),
+                     (1, -1, 1.41421356), (1, 0, 1.0), (1, 1, 1.41421356))
+        while heap:
+            _, idx = heapq.heappop(heap)
+            if closed[idx]:
+                continue
+            closed[idx] = True
+            cy, cx = divmod(idx, w)
+            base = pot[idx]
+            for dy, dx, dist in neighbors:
+                ny = cy + dy
+                nx = cx + dx
+                if ny < 0 or nx < 0 or ny >= h or nx >= w:
+                    continue
+                nidx = ny * w + nx
+                if closed[nidx] or blocked[ny, nx]:
+                    continue
+                tentative = base + dist * step_cost[ny, nx]
+                if tentative < pot[nidx]:
+                    pot[nidx] = tentative
+                    heapq.heappush(heap, (float(tentative) + float(heuristic[ny, nx]), nidx))
+        return pot.reshape(h, w)
+
+    def _gradient_path(self, potential, start, goal):
+        """NavFn calcPath 相当: ポテンシャル場を勾配降下してサブピクセル経路を抽出。"""
+        h, w = potential.shape
+        if h < 3 or w < 3:
+            return None
+        pot = potential.reshape(-1)
+        POT_HIGH = 1.0e10
+        COST_NEUTRAL = 50.0
+        path_step = 0.5
+
+        sx = min(max(int(start[0]), 1), w - 2)
+        sy = min(max(int(start[1]), 1), h - 2)
+        stc = sy * w + sx
+        dx = dy = 0.0
+        path = [(float(sx), float(sy))]
+
+        for _ in range(200000):
+            nearest = stc + int(round(dx)) + w * int(round(dy))
+            nearest = min(max(nearest, 0), h * w - 1)
+            if pot[nearest] < COST_NEUTRAL:
+                path.append((float(goal[0]), float(goal[1])))
+                return path
+            if stc < w or stc >= (h - 1) * w:
+                return path if len(path) > 1 else None
+
+            path.append((float(stc % w) + dx, float(stc // w) + dy))
+
+            stcnx = stc + w
+            stcpx = stc - w
+            nbrs = (stc, stc + 1, stc - 1, stcnx, stcnx + 1, stcnx - 1,
+                    stcpx, stcpx + 1, stcpx - 1)
+            if any(pot[i] >= POT_HIGH for i in nbrs) or self._path_oscillates(path):
+                minc = stc
+                minp = pot[stc]
+                for i in nbrs:
+                    if pot[i] < minp:
+                        minp = pot[i]
+                        minc = i
+                stc = minc
+                dx = dy = 0.0
+                if pot[stc] >= POT_HIGH:
+                    return None
+            else:
+                gx = self._interp_grad(pot, stc, stc + 1, stcnx, stcnx + 1, dx, dy, w, h, True)
+                gy = self._interp_grad(pot, stc, stc + 1, stcnx, stcnx + 1, dx, dy, w, h, False)
+                if gx == 0.0 and gy == 0.0:
+                    return None
+                ss = path_step / np.hypot(gx, gy)
+                dx += gx * ss
+                dy += gy * ss
+                if dx > 1.0:
+                    stc += 1; dx -= 1.0
+                if dx < -1.0:
+                    stc -= 1; dx += 1.0
+                if dy > 1.0:
+                    stc += w; dy -= 1.0
+                if dy < -1.0:
+                    stc -= w; dy += 1.0
+        return path if len(path) > 1 else None
+
+    @staticmethod
+    def _path_oscillates(path):
+        return len(path) > 2 and path[-1] == path[-3]
+
+    def _interp_grad(self, pot, a, b, c, d, dx, dy, w, h, x_axis):
+        """4点(a,b,c,d)の勾配を双線形補間する。a=stc, b=stc+1, c=stc+w, d=stc+w+1"""
+        ga = self._grad_at(pot, a, w, h, x_axis)
+        gb = self._grad_at(pot, b, w, h, x_axis)
+        gc = self._grad_at(pot, c, w, h, x_axis)
+        gd = self._grad_at(pot, d, w, h, x_axis)
+        x1 = (1.0 - dx) * ga + dx * gb
+        x2 = (1.0 - dx) * gc + dx * gd
+        return (1.0 - dy) * x1 + dy * x2
+
+    @staticmethod
+    def _grad_at(pot, n, w, h, x_axis):
+        """NavFn gradCell 相当: ポテンシャルの勾配（ゴールへ向かう向き）。"""
+        POT_HIGH = 1.0e10
+        x = n % w
+        y = n // w
+        if x <= 0 or x >= w - 1 or y <= 0 or y >= h - 1:
+            return 0.0
+        cv = pot[n]
+        if cv >= POT_HIGH:
+            if x_axis:
+                if pot[n - 1] < POT_HIGH:
+                    return -1.0
+                if pot[n + 1] < POT_HIGH:
+                    return 1.0
+            else:
+                if pot[n - w] < POT_HIGH:
+                    return -1.0
+                if pot[n + w] < POT_HIGH:
+                    return 1.0
+            return 0.0
+        dx = 0.0
+        dy = 0.0
+        if pot[n - 1] < POT_HIGH:
+            dx += pot[n - 1] - cv
+        if pot[n + 1] < POT_HIGH:
+            dx += cv - pot[n + 1]
+        if pot[n - w] < POT_HIGH:
+            dy += pot[n - w] - cv
+        if pot[n + w] < POT_HIGH:
+            dy += cv - pot[n + w]
+        norm = np.hypot(dx, dy)
+        if norm <= 0.0:
+            return 0.0
+        return (dx if x_axis else dy) / norm
+
+    def _simple_smooth(self, points, cost, data_w=0.2, smooth_w=0.3,
+                       tolerance=1e-10, max_its=1000, refinement=2):
+        """Nav2 SimpleSmoother相当（w_data=0.2, w_smooth=0.3, do_refinement=2）。"""
+        if len(points) <= 2:
+            return points
+        h, w = cost.shape
+        y = np.array(points, dtype=np.float64)
+        for _ in range(refinement + 1):
+            x = y.copy()
+            for _it in range(max_its):
+                y_prev = y.copy()
+                y[1:-1] = (y[1:-1] + data_w * (x[1:-1] - y[1:-1])
+                           + smooth_w * (y[2:] + y[:-2] - 2.0 * y[1:-1]))
+                change = float(np.abs(y[1:-1] - y_prev[1:-1]).sum())
+                xs = np.clip(np.round(y[:, 0]).astype(np.int64), 0, w - 1)
+                ys = np.clip(np.round(y[:, 1]).astype(np.int64), 0, h - 1)
+                if np.any(cost[ys, xs] >= 253):
+                    y = y_prev
+                    break
+                if change < tolerance:
+                    break
+        return [(float(p[0]), float(p[1])) for p in y]
+
+    @staticmethod
+    def _path_is_free(points, cost):
+        """パス上のサンプル点が致死/内接セル(>=253)を通っていないか確認する。"""
+        height, width = cost.shape
+        for i in range(len(points) - 1):
+            x0, y0 = points[i]
+            x1, y1 = points[i + 1]
+            steps = int(max(abs(x1 - x0), abs(y1 - y0))) + 1
+            for t in range(steps + 1):
+                x = int(round(x0 + (x1 - x0) * t / steps))
+                y = int(round(y0 + (y1 - y0) * t / steps))
+                if 0 <= x < width and 0 <= y < height and cost[y, x] >= 253:
+                    return False
+        return True
+
+    @staticmethod
+    def _downsample_window(window, start, goal, step):
+        """コスト窓を最大値プーリングで縮小し、始点/終点も粗座標へ変換する。"""
+        h, w = window.shape
+        ch = (h + step - 1) // step
+        cw = (w + step - 1) // step
+        padded = np.pad(window, ((0, ch * step - h), (0, cw * step - w)), constant_values=0)
+        coarse = padded.reshape(ch, step, cw, step).max(axis=(1, 3))
+        return coarse, (start[0] // step, start[1] // step), (goal[0] // step, goal[1] // step)
+
+    def _astar_window(self, grid, start, goal):
+        """8近傍A*。コストはNavFn同様 COST_NEUTRAL + COST_FACTOR*cost を用いる。"""
+        import heapq
+
+        h, w = grid.shape
+        sx, sy = start
+        gx, gy = goal
+        blocked = grid >= 253
+        blocked[sy, sx] = False
+        blocked[gy, gx] = False
+
+        cost_neutral = 50.0
+        cost_factor = 0.8
+        # コストが高すぎる領域を避けるため、距離に応じた重みを掛ける
+        step_cost = np.zeros((h, w), dtype=np.float32)
+        np.add(cost_neutral, grid.astype(np.float32) * cost_factor, out=step_cost)
+        step_cost /= cost_neutral
+
+        ys, xs = np.mgrid[0:h, 0:w]
+        heuristic = np.hypot(xs - gx, ys - gy).astype(np.float32)
+
+        n = h * w
+        g_score = np.full(n, np.inf, dtype=np.float32)
+        parent = np.full(n, -1, dtype=np.int32)
+        closed = np.zeros(n, dtype=bool)
+        sidx = sy * w + sx
+        gidx = gy * w + gx
+        g_score[sidx] = 0.0
+
+        neighbors = ((-1, -1, 1.41421356), (-1, 0, 1.0), (-1, 1, 1.41421356),
+                     (0, -1, 1.0), (0, 1, 1.0),
+                     (1, -1, 1.41421356), (1, 0, 1.0), (1, 1, 1.41421356))
+        heap = [(float(heuristic[sy, sx]), sidx)]
+        found = False
+        while heap:
+            _, idx = heapq.heappop(heap)
+            if idx == gidx:
+                found = True
+                break
+            if closed[idx]:
+                continue
+            closed[idx] = True
+            cy, cx = divmod(idx, w)
+            base_g = g_score[idx]
+            for dy, dx, dist in neighbors:
+                ny = cy + dy
+                nx = cx + dx
+                if ny < 0 or nx < 0 or ny >= h or nx >= w:
+                    continue
+                nidx = ny * w + nx
+                if closed[nidx] or blocked[ny, nx]:
+                    continue
+                tentative = base_g + dist * step_cost[ny, nx]
+                if tentative < g_score[nidx]:
+                    g_score[nidx] = tentative
+                    parent[nidx] = idx
+                    heapq.heappush(heap, (tentative + float(heuristic[ny, nx]), nidx))
+
+        if not found:
+            return None
+        path = []
+        cur = gidx
+        while cur != -1:
+            cy, cx = divmod(cur, w)
+            path.append((cx, cy))
+            if cur == sidx:
+                break
+            cur = parent[cur]
+        path.reverse()
+        return path
+
+    @staticmethod
+    def _smooth_path(points, iterations=1):
+        """計画パスを軽く平滑化する（Nav2のsmoother相当の簡易処理）。"""
+        if len(points) <= 2:
+            return points
+        pts = [(float(p[0]), float(p[1])) for p in points]
+        for _ in range(iterations):
+            new_pts = [pts[0]]
+            for i in range(1, len(pts) - 1):
+                x = (pts[i - 1][0] + 2 * pts[i][0] + pts[i + 1][0]) / 4.0
+                y = (pts[i - 1][1] + 2 * pts[i][1] + pts[i + 1][1]) / 4.0
+                new_pts.append((x, y))
+            new_pts.append(pts[-1])
+            pts = new_pts
+        return pts
 
     def handle_waypoint_edited(self, waypoint):
         """ウェイポイント編集時の処理"""
@@ -2472,9 +3206,11 @@ class ImageViewer(QWidget):
             self.waypoint_edited.emit(waypoint)
         elif action['type'] == 'draw':
             # 描画レイヤーを以前の状態に戻す
+            # 描画レイヤーを以前の状態に戻す
             self.drawing_layer.pixmap = action['old_pixmap'].copy()
             if 'old_pgm_pixmap' in action:
                 self.pgm_layer.pixmap = action['old_pgm_pixmap'].copy()
+            self._restore_erased_map_region(action.get('map_bbox'), action.get('map_old'))
         elif action['type'] == 'cost_draw':
             if action.get('old_costmap_pixmap') is not None:
                 self.costmap_layer.pixmap = action['old_costmap_pixmap'].copy()
@@ -2515,9 +3251,11 @@ class ImageViewer(QWidget):
             self.waypoint_edited.emit(waypoint)
         elif action['type'] == 'draw':
             # 描画レイヤーを新しい状態に進める
+            # 描画レイヤーを新しい状態に進める
             self.drawing_layer.pixmap = action['new_pixmap'].copy()
             if 'new_pgm_pixmap' in action:
                 self.pgm_layer.pixmap = action['new_pgm_pixmap'].copy()
+            self._restore_erased_map_region(action.get('map_bbox'), action.get('map_new'))
         elif action['type'] == 'cost_draw':
             if action.get('new_costmap_pixmap') is not None:
                 self.costmap_layer.pixmap = action['new_costmap_pixmap'].copy()
@@ -2526,6 +3264,19 @@ class ImageViewer(QWidget):
             
         self.update_display()
         self.history_changed.emit(self.can_undo(), self.can_redo())
+
+    def _restore_erased_map_region(self, bbox, region):
+        """消しゴムで消した地図領域をUndo/Redo用に復元する。"""
+        if not bbox or region is None or self.map_image_array is None:
+            return
+        x0, y0, x1, y1 = bbox
+        if (x1 - x0) != region.shape[1] or (y1 - y0) != region.shape[0]:
+            return
+        self.map_image_array[y0:y1, x0:x1] = region
+        self._refresh_pgm_pixmap_from_array()
+        self._inflation_params_key = None
+        if self.inflation_enabled:
+            self._update_inflation_region((x0, y0, x1, y1))
 
 class MenuPanel(QWidget):
     """メニューパネル
@@ -2538,6 +3289,7 @@ class MenuPanel(QWidget):
     roadmap_selected = Signal(str)  # 路面マップ（色付き地図）選択用シグナル
     undo_requested = Signal()  # 戻るボタン用シグナル
     redo_requested = Signal()  # 進むボタン用シグナル
+    map_image_requested = Signal()  # 地図全体の画像保存用シグナル
     
     def __init__(self, parent=None):
         super().__init__(parent)
@@ -2598,6 +3350,11 @@ class MenuPanel(QWidget):
         # ファイルメニューのアクションを作成
         open_action = file_menu.addAction("Open PGM")
         save_action = file_menu.addAction("Save PGM")
+        save_image_action = file_menu.addAction("Save Map Image")
+        save_image_action.setToolTip(
+            "地図全体を1枚の画像として保存（地図＋ウェイポイント＋路面マッピング＋パス）"
+        )
+        save_image_action.triggered.connect(self.map_image_requested.emit)
         file_menu.addSeparator()
         exit_action = file_menu.addAction("Exit")
         
@@ -2785,6 +3542,136 @@ class LayerControl(QWidget):
         """不透明度の変更"""
         self.layer.set_opacity(value / 100.0)
 
+class _CollapsibleHeader(QWidget):
+    """クリックで開閉を通知するヘッダーウィジェット。"""
+
+    clicked = Signal()
+
+    def mousePressEvent(self, event):
+        if event.button() == Qt.MouseButton.LeftButton:
+            self.clicked.emit()
+            event.accept()
+            return
+        super().mousePressEvent(event)
+
+
+class CollapsibleSection(QWidget):
+    """ヘッダーをクリックすると本文を折りたたみ/展開できるセクション。
+
+    既存のパネル（タイトル＋本文）を置き換える形で使う。
+    ヘッダーには `add_header_widget`、本文には `add_content_widget` で
+    ウィジェットを追加する。
+    """
+
+    toggled = Signal(bool)  # 展開状態が変化したときに発火 (True=展開)
+
+    def __init__(self, title, expanded=True, parent=None):
+        super().__init__(parent)
+        self._expanded = bool(expanded)
+        self.setObjectName("CollapsibleSection")
+
+        outer = QVBoxLayout(self)
+        outer.setContentsMargins(0, 0, 0, 0)
+        outer.setSpacing(5)
+
+        # ヘッダー
+        self.header = _CollapsibleHeader()
+        self.header.setObjectName("CollapsibleHeader")
+        self.header.setCursor(Qt.CursorShape.PointingHandCursor)
+        self.header.setStyleSheet("""
+            QWidget#CollapsibleHeader {
+                background-color: #e0e0e0;
+                border-radius: 3px;
+            }
+        """)
+        self.header.clicked.connect(self.toggle)
+
+        self.header_layout = QHBoxLayout(self.header)
+        self.header_layout.setContentsMargins(5, 5, 5, 5)
+        self.header_layout.setSpacing(5)
+
+        # 開閉矢印
+        self.toggle_button = QPushButton()
+        self.toggle_button.setFixedSize(20, 20)
+        self.toggle_button.setCursor(Qt.CursorShape.PointingHandCursor)
+        self.toggle_button.setFocusPolicy(Qt.FocusPolicy.NoFocus)
+        self.toggle_button.setStyleSheet("""
+            QPushButton {
+                background-color: transparent;
+                border: none;
+                color: #333333;
+                font-size: 11px;
+                padding: 0;
+            }
+            QPushButton:hover {
+                background-color: #cfcfcf;
+                border-radius: 3px;
+            }
+        """)
+        self.toggle_button.clicked.connect(self.toggle)
+
+        # タイトル
+        self.title_label = QLabel(title)
+        self.title_label.setStyleSheet("""
+            QLabel {
+                font-size: 14px;
+                font-weight: bold;
+                padding: 0;
+                background-color: transparent;
+                color: #000000;
+            }
+        """)
+
+        self.header_layout.addWidget(self.toggle_button)
+        self.header_layout.addWidget(self.title_label)
+
+        # 本文
+        self.content = QWidget()
+        self.content.setObjectName("CollapsibleContent")
+        self.content_layout = QVBoxLayout(self.content)
+        self.content_layout.setContentsMargins(0, 0, 0, 0)
+        self.content_layout.setSpacing(5)
+
+        outer.addWidget(self.header)
+        outer.addWidget(self.content)
+
+        self._apply_state()
+
+    def add_header_widget(self, widget, stretch=0):
+        """ヘッダー右側にウィジェットを追加する。"""
+        self.header_layout.addWidget(widget, stretch)
+
+    def add_header_stretch(self):
+        """ヘッダーに伸縮スペーサーを追加する。"""
+        self.header_layout.addStretch()
+
+    def add_content_widget(self, widget, stretch=0):
+        """本文にウィジェットを追加する。"""
+        self.content_layout.addWidget(widget, stretch)
+
+    def add_content_layout(self, layout):
+        """本文にレイアウトを追加する。"""
+        self.content_layout.addLayout(layout)
+
+    def is_expanded(self):
+        return self._expanded
+
+    def toggle(self):
+        self.set_expanded(not self._expanded)
+
+    def set_expanded(self, expanded):
+        self._expanded = bool(expanded)
+        self._apply_state()
+        self.toggled.emit(self._expanded)
+
+    def _apply_state(self):
+        # シグナルの再入を防ぐためボタン更新中は通知を止める
+        self.toggle_button.blockSignals(True)
+        self.toggle_button.setText("▼" if self._expanded else "▶")
+        self.toggle_button.blockSignals(False)
+        self.content.setVisible(self._expanded)
+
+
 class RightPanel(QWidget):
     """右側のパネル"""
     waypoint_delete_requested = Signal(int)  # 新しいシグナルを追加
@@ -2799,6 +3686,9 @@ class RightPanel(QWidget):
     landmark_import_requested = Signal(str)
     landmark_export_requested = Signal()
     costmap_export_requested = Signal()
+    map_image_requested = Signal()  # 地図全体の画像保存用シグナル
+    # 障害物膨張(Nav2): (enabled, inflation_radius, cost_scaling_factor, inscribed_radius, opacity%)
+    inflation_changed = Signal(bool, float, float, float, int)
     
     def __init__(self):
         super().__init__()
@@ -2823,6 +3713,10 @@ class RightPanel(QWidget):
         # レイヤーパネルを追加
         self.layer_widget = self.create_layer_panel()
         layout.addWidget(self.layer_widget)
+
+        # 障害物膨張パネルを追加
+        self.inflation_widget = self.create_inflation_panel()
+        layout.addWidget(self.inflation_widget)
         
         # ウェイポイントリストパネルを追加
         self.waypoint_widget = self.create_waypoint_panel()
@@ -2846,19 +3740,7 @@ class RightPanel(QWidget):
 
     def create_layer_panel(self):
         """レイヤーパネルを作成"""
-        widget = QWidget()
-        layout = QVBoxLayout(widget)
-        
-        title_label = QLabel("Layers")
-        title_label.setStyleSheet("""
-            QLabel {
-                font-size: 14px;
-                font-weight: bold;
-                padding: 5px;
-                background-color: #e0e0e0;
-                border-radius: 3px;
-            }
-        """)
+        section = CollapsibleSection("Layers")
         
         # スクロールエリアを追加
         scroll_area = QScrollArea()
@@ -2890,32 +3772,164 @@ class RightPanel(QWidget):
         scroll_area.setMinimumHeight(150)
         scroll_area.setMaximumHeight(200)
         
-        layout.addWidget(title_label)
-        layout.addWidget(scroll_area)
-        layout.setSpacing(5)
+        section.add_content_widget(scroll_area)
         
-        return widget
+        return section
+
+    def create_inflation_panel(self):
+        """障害物膨張(Nav2 global costmap)の設定パネルを作成"""
+        section = CollapsibleSection("Obstacle Inflation (Nav2)")
+
+        content = QWidget()
+        content.setStyleSheet("""
+            QWidget {
+                background-color: white;
+                border: 1px solid #ccc;
+                border-radius: 3px;
+                padding: 10px;
+            }
+        """)
+        content_layout = QVBoxLayout(content)
+
+        self.inflation_enable_cb = QCheckBox("Enable inflation (Nav2 costmap colors)")
+        self.inflation_enable_cb.setChecked(False)
+        self.inflation_enable_cb.setToolTip(
+            "Nav2 global_costmap の inflation_layer と同じ膨張を表示します"
+        )
+        content_layout.addWidget(self.inflation_enable_cb)
+
+        form = QGridLayout()
+        form.setHorizontalSpacing(8)
+        form.setVerticalSpacing(4)
+
+        self.inflation_radius_spin = QDoubleSpinBox()
+        self.inflation_radius_spin.setRange(0.0, 10.0)
+        self.inflation_radius_spin.setSingleStep(0.05)
+        self.inflation_radius_spin.setDecimals(2)
+        self.inflation_radius_spin.setValue(0.75)
+        self.inflation_radius_spin.setSuffix(" m")
+        form.addWidget(QLabel("Inflation radius"), 0, 0)
+        form.addWidget(self.inflation_radius_spin, 0, 1)
+
+        self.inflation_cost_scaling_spin = QDoubleSpinBox()
+        self.inflation_cost_scaling_spin.setRange(0.0, 50.0)
+        self.inflation_cost_scaling_spin.setSingleStep(0.5)
+        self.inflation_cost_scaling_spin.setDecimals(1)
+        self.inflation_cost_scaling_spin.setValue(3.0)
+        form.addWidget(QLabel("Cost scaling factor"), 1, 0)
+        form.addWidget(self.inflation_cost_scaling_spin, 1, 1)
+
+        self.inflation_inscribed_spin = QDoubleSpinBox()
+        self.inflation_inscribed_spin.setRange(0.0, 5.0)
+        self.inflation_inscribed_spin.setSingleStep(0.05)
+        self.inflation_inscribed_spin.setDecimals(2)
+        self.inflation_inscribed_spin.setValue(0.35)
+        self.inflation_inscribed_spin.setSuffix(" m")
+        self.inflation_inscribed_spin.setToolTip(
+            "内接半径。ロボットfootprintから自動算出（手動で上書きも可）"
+        )
+        form.addWidget(QLabel("Inscribed radius"), 2, 0)
+        form.addWidget(self.inflation_inscribed_spin, 2, 1)
+
+        # ロボットの幾何サイズ（footprint）。内接半径はこの4値の最小値から自動算出する。
+        form.addWidget(QLabel("Robot footprint (m)"), 3, 0)
+
+        self.footprint_front_spin = QDoubleSpinBox()
+        self.footprint_back_spin = QDoubleSpinBox()
+        self.footprint_left_spin = QDoubleSpinBox()
+        self.footprint_right_spin = QDoubleSpinBox()
+        footprint_specs = (
+            (self.footprint_front_spin, "Front (+x)", 0.50),
+            (self.footprint_back_spin, "Back (-x)", 0.70),
+            (self.footprint_left_spin, "Left (+y)", 0.35),
+            (self.footprint_right_spin, "Right (-y)", 0.35),
+        )
+        for row, (spin, label, default) in enumerate(footprint_specs, start=4):
+            spin.setRange(0.0, 5.0)
+            spin.setSingleStep(0.05)
+            spin.setDecimals(2)
+            spin.setValue(default)
+            spin.setSuffix(" m")
+            form.addWidget(QLabel(label), row, 0)
+            form.addWidget(spin, row, 1)
+
+        content_layout.addLayout(form)
+
+        # 不透明度
+        opacity_row = QHBoxLayout()
+        opacity_row.addWidget(QLabel("Opacity"))
+        self.inflation_opacity_slider = QSlider(Qt.Orientation.Horizontal)
+        self.inflation_opacity_slider.setRange(0, 100)
+        self.inflation_opacity_slider.setValue(20)
+        self.inflation_opacity_label = QLabel("20%")
+        self.inflation_opacity_label.setMinimumWidth(40)
+        self.inflation_opacity_slider.valueChanged.connect(
+            lambda value: self.inflation_opacity_label.setText(f"{value}%")
+        )
+        opacity_row.addWidget(self.inflation_opacity_slider, stretch=1)
+        opacity_row.addWidget(self.inflation_opacity_label)
+        content_layout.addLayout(opacity_row)
+
+        reset_button = QPushButton("Reset to Sirius Nav2 defaults")
+        reset_button.setToolTip("inflation_radius=0.75, cost_scaling_factor=3.0, inscribed=0.35")
+        reset_button.clicked.connect(self.reset_inflation_defaults)
+        content_layout.addWidget(reset_button)
+
+        section.add_content_widget(content)
+
+        # 変更をまとめて通知
+        self.inflation_enable_cb.toggled.connect(self._emit_inflation_changed)
+        self.inflation_radius_spin.valueChanged.connect(self._emit_inflation_changed)
+        self.inflation_cost_scaling_spin.valueChanged.connect(self._emit_inflation_changed)
+        self.inflation_inscribed_spin.valueChanged.connect(self._emit_inflation_changed)
+        self.inflation_opacity_slider.valueChanged.connect(self._emit_inflation_changed)
+
+        # footprint変更時は内接半径を自動算出（シリウスfootprintなら0.35m）
+        for spin, _label, _default in footprint_specs:
+            spin.valueChanged.connect(self._update_inscribed_from_footprint)
+
+        return section
+
+    @staticmethod
+    def sirius_footprint_defaults():
+        """シリウスのfootprint [front, back, left, right] (m)。params/nav2_params.yaml 由来。"""
+        return (0.50, 0.70, 0.35, 0.35)
+
+    def _update_inscribed_from_footprint(self, *args):
+        """footprintの4値の最小値を内接半径として反映する。"""
+        inscribed = min(
+            float(self.footprint_front_spin.value()),
+            float(self.footprint_back_spin.value()),
+            float(self.footprint_left_spin.value()),
+            float(self.footprint_right_spin.value()),
+        )
+        self.inflation_inscribed_spin.setValue(round(inscribed, 3))
+
+    def _emit_inflation_changed(self, *args):
+        """膨張設定の変更を1つのシグナルで通知する。"""
+        self.inflation_changed.emit(
+            self.inflation_enable_cb.isChecked(),
+            float(self.inflation_radius_spin.value()),
+            float(self.inflation_cost_scaling_spin.value()),
+            float(self.inflation_inscribed_spin.value()),
+            int(self.inflation_opacity_slider.value()),
+        )
+
+    def reset_inflation_defaults(self):
+        """シリウスのNav2 global_costmapと同じ膨張設定・footprintへ戻す。"""
+        front, back, left, right = self.sirius_footprint_defaults()
+        self.footprint_front_spin.setValue(front)
+        self.footprint_back_spin.setValue(back)
+        self.footprint_left_spin.setValue(left)
+        self.footprint_right_spin.setValue(right)
+        self.inflation_radius_spin.setValue(0.75)
+        self.inflation_cost_scaling_spin.setValue(3.0)
+        self.inflation_inscribed_spin.setValue(min(front, back, left, right))
+        self.inflation_opacity_slider.setValue(20)
 
     def create_waypoint_panel(self):
         """ウェイポイントリストパネルを作成"""
-        widget = QWidget()
-        layout = QVBoxLayout(widget)
-        layout.setSpacing(5)
-        
-        # ヘッダー部分のレイアウト
-        header_layout = QHBoxLayout()
-        
-        # タイトル
-        title_label = QLabel("Waypoints")
-        title_label.setStyleSheet("""
-            QLabel {
-                font-size: 14px;
-                font-weight: bold;
-                padding: 5px;
-                background-color: #e0e0e0;
-                border-radius: 3px;
-            }
-        """)
+        section = CollapsibleSection("Waypoints")
         
         # パス生成ボタン（トグルボタンに変更）
         self.generate_path_button = QPushButton("Generate Path")
@@ -2973,11 +3987,10 @@ class RightPanel(QWidget):
         """)
         import_button.clicked.connect(self.handle_import_waypoints)
         
-        header_layout.addWidget(title_label)
-        header_layout.addWidget(import_button)  # インポートボタンを追加
-        header_layout.addStretch()
-        header_layout.addWidget(self.generate_path_button)
-        header_layout.addWidget(clear_button)
+        section.add_header_widget(import_button)  # インポートボタンを追加
+        section.add_header_stretch()
+        section.add_header_widget(self.generate_path_button)
+        section.add_header_widget(clear_button)
         
         # スクロールエリアの作成と設定を更新
         self.scroll_area = QScrollArea()  # インスタンス変数として保存
@@ -3010,28 +4023,13 @@ class RightPanel(QWidget):
         self.scroll_area.setMinimumHeight(150)
         self.scroll_area.setMaximumHeight(300)
         
-        layout.addLayout(header_layout)
-        layout.addWidget(self.scroll_area)
+        section.add_content_widget(self.scroll_area)
         
-        return widget
+        return section
 
     def create_landmark_panel(self):
         """ランドマークリストパネルを作成"""
-        widget = QWidget()
-        layout = QVBoxLayout(widget)
-        layout.setSpacing(5)
-
-        header_layout = QHBoxLayout()
-        title_label = QLabel("Landmarks")
-        title_label.setStyleSheet("""
-            QLabel {
-                font-size: 14px;
-                font-weight: bold;
-                padding: 5px;
-                background-color: #e0e0e0;
-                border-radius: 3px;
-            }
-        """)
+        section = CollapsibleSection("Landmarks")
 
         import_button = QPushButton("Import")
         import_button.setToolTip("Import Landmarks YAML/JSON")
@@ -3058,11 +4056,10 @@ class RightPanel(QWidget):
         """)
         clear_button.clicked.connect(self.all_landmarks_delete_requested.emit)
 
-        header_layout.addWidget(title_label)
-        header_layout.addWidget(import_button)
-        header_layout.addWidget(export_button)
-        header_layout.addStretch()
-        header_layout.addWidget(clear_button)
+        section.add_header_widget(import_button)
+        section.add_header_widget(export_button)
+        section.add_header_stretch()
+        section.add_header_widget(clear_button)
 
         self.landmark_scroll_area = QScrollArea()
         self.landmark_scroll_area.setWidgetResizable(True)
@@ -3088,27 +4085,13 @@ class RightPanel(QWidget):
         self.landmark_scroll_area.setMinimumHeight(120)
         self.landmark_scroll_area.setMaximumHeight(220)
 
-        layout.addLayout(header_layout)
-        layout.addWidget(self.landmark_scroll_area)
+        section.add_content_widget(self.landmark_scroll_area)
 
-        return widget
+        return section
 
     def create_export_panel(self):
         """エクスポートパネルを作成"""
-        widget = QWidget()
-        layout = QVBoxLayout(widget)
-        
-        # タイトル
-        title_label = QLabel("Export")  # タイトルを元に戻す
-        title_label.setStyleSheet("""
-            QLabel {
-                font-size: 14px;
-                font-weight: bold;
-                padding: 5px;
-                background-color: #e0e0e0;
-                border-radius: 3px;
-            }
-        """)
+        section = CollapsibleSection("Export")
         
         # コンテンツエリア
         content = QWidget()
@@ -3147,6 +4130,26 @@ class RightPanel(QWidget):
             }
         """)
         export_button.clicked.connect(self.handle_export)
+
+        # 地図全体（地図＋ウェイポイント＋路面マッピング＋パス）を1枚の画像で保存
+        save_image_button = QPushButton("Save Map Image")
+        save_image_button.setToolTip(
+            "地図全体を1枚の画像として保存（地図＋ウェイポイント＋路面マッピング＋パス）"
+        )
+        save_image_button.setStyleSheet("""
+            QPushButton {
+                background-color: #2196F3;
+                color: white;
+                border-radius: 3px;
+                padding: 8px;
+                font-size: 12px;
+                min-width: 100px;
+            }
+            QPushButton:hover {
+                background-color: #1976D2;
+            }
+        """)
+        save_image_button.clicked.connect(self.map_image_requested.emit)
         
         # レイアウトに追加（インポートボタン関連の行を削除）
         content_layout.addWidget(self.export_pgm_cb)
@@ -3155,11 +4158,11 @@ class RightPanel(QWidget):
         content_layout.addWidget(self.export_costmap_cb)
         button_layout.addWidget(export_button)
         content_layout.addLayout(button_layout)
+        content_layout.addWidget(save_image_button)
         
-        layout.addWidget(title_label)
-        layout.addWidget(content)
+        section.add_content_widget(content)
         
-        return widget
+        return section
 
     def handle_import_waypoints(self):
         """Waypointのインポート処理"""
@@ -3771,6 +4774,9 @@ class MainWindow(QMainWindow):
         # 戻る/進むボタンのシグナルを接続
         self.menu_panel.undo_requested.connect(self.image_viewer.undo)
         self.menu_panel.redo_requested.connect(self.image_viewer.redo)
+
+        # 地図全体の画像保存を接続
+        self.menu_panel.map_image_requested.connect(self.export_map_image)
         
         # 履歴状態の変更を監視
         self.image_viewer.history_changed.connect(self.update_history_buttons)
@@ -3823,6 +4829,12 @@ class MainWindow(QMainWindow):
 
         # エクスポート時の処理を接続
         self.right_panel.export_requested.connect(self.handle_export)
+
+        # 地図全体の画像保存時の処理を接続
+        self.right_panel.map_image_requested.connect(self.export_map_image)
+
+        # 障害物膨張(Nav2)設定の変更を接続
+        self.right_panel.inflation_changed.connect(self.handle_inflation_changed)
 
         # インポート時の処理を接続
         self.right_panel.waypoint_import_requested.connect(self.import_waypoints_yaml)
@@ -3961,6 +4973,10 @@ class MainWindow(QMainWindow):
         if export_waypoints:
             self.export_waypoints_yaml()
 
+    def handle_inflation_changed(self, enabled, radius, cost_scaling, inscribed, opacity):
+        """障害物膨張(Nav2)設定の変更をImageViewerへ反映する。"""
+        self.image_viewer.set_inflation(enabled, radius, cost_scaling, inscribed, opacity)
+
     def export_pgm_with_drawings(self):
         """描画込みのPGMファイルをエクスポート"""
         file_name, _ = QFileDialog.getSaveFileName(
@@ -4055,6 +5071,44 @@ class MainWindow(QMainWindow):
                 yaml.dump(yaml_data, f, default_flow_style=None)
         except Exception as e:
             QMessageBox.warning(self, "Error", f"Error saving YAML file: {str(e)}")
+
+    def export_map_image(self):
+        """地図全体（地図＋ウェイポイント＋路面マッピング＋パス）を1枚の画像として保存する。"""
+        if not self.image_viewer.pgm_layer.pixmap:
+            QMessageBox.warning(self, "No Map", "先に地図を読み込んでください。")
+            return
+
+        file_name, selected_filter = QFileDialog.getSaveFileName(
+            self,
+            "Save Map Image",
+            "",
+            "PNG Image (*.png);;JPEG Image (*.jpg *.jpeg);;BMP Image (*.bmp);;All Files (*)"
+        )
+        if not file_name:
+            return
+
+        # 拡張子が無い場合は選択したフィルタから補完
+        _, ext = os.path.splitext(file_name)
+        if not ext:
+            lowered = selected_filter.lower()
+            if "jpg" in lowered or "jpeg" in lowered:
+                file_name += ".jpg"
+            elif "bmp" in lowered:
+                file_name += ".bmp"
+            else:
+                file_name += ".png"
+
+        pixmap = self.image_viewer.render_composite_pixmap()
+        if pixmap is None:
+            QMessageBox.warning(self, "Error", "地図画像を生成できませんでした。")
+            return
+
+        if pixmap.save(file_name):
+            QMessageBox.information(
+                self, "Saved", f"地図全体の画像を保存しました:\n{file_name}"
+            )
+        else:
+            QMessageBox.critical(self, "Error", f"画像の保存に失敗しました:\n{file_name}")
 
     def export_waypoints_yaml(self):
         """ウェイポイントをYAMLファイルとしてエクスポート"""
@@ -4291,13 +5345,6 @@ class FormatEditorPanel(QFrame):
                 background-color: #f5f5f5;
                 border-radius: 5px;
             }
-            QLabel {
-                font-size: 14px;
-                font-weight: bold;
-                padding: 5px;
-                background-color: #e0e0e0;
-                border-radius: 3px;
-            }
             QWidget#contentWidget {
                 background-color: white;
                 border: 1px solid #ccc;
@@ -4319,9 +5366,8 @@ class FormatEditorPanel(QFrame):
         layout.setSpacing(5)
         layout.setContentsMargins(10, 10, 10, 10)  # マージンを追加
         
-        # タイトル行（Format Editor + パラメータ解説ボタン）
-        title_row = QHBoxLayout()
-        title_label = QLabel("Format Editor")
+        # 折りたたみ可能なセクション（Format Editor + パラメータ解説ボタン）
+        self.section = CollapsibleSection("Format Editor")
         self.help_button = QPushButton("パラメータ解説")
         self.help_button.setCheckable(True)
         self.help_button.setStyleSheet("""
@@ -4336,9 +5382,8 @@ class FormatEditorPanel(QFrame):
             QPushButton:checked { background-color: #37474F; }
         """)
         self.help_button.toggled.connect(self.toggle_help)
-        title_row.addWidget(title_label)
-        title_row.addStretch()
-        title_row.addWidget(self.help_button)
+        self.section.add_header_stretch()
+        self.section.add_header_widget(self.help_button)
 
         # コンテンツエリア
         content_widget = QWidget()
@@ -4430,9 +5475,8 @@ class FormatEditorPanel(QFrame):
         content_layout.addWidget(self.editor)
         content_layout.addLayout(button_layout)
 
-        # メインレイアウトに要素を追加
-        layout.addLayout(title_row)
-        layout.addWidget(content_widget)
+        # セクション本文にコンテンツを追加
+        self.section.add_content_widget(content_widget)
 
         # デフォルトパラメータの解説（ボタンで開閉・既定は折りたたみ）
         self.help_box = QTextEdit()
@@ -4451,7 +5495,10 @@ class FormatEditorPanel(QFrame):
         """)
         self.help_box.setVerticalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAsNeeded)
         self.help_box.setVisible(False)  # 既定は折りたたみ
-        layout.addWidget(self.help_box)
+        self.section.add_content_widget(self.help_box)
+
+        # メインレイアウトにセクションを追加
+        layout.addWidget(self.section)
 
         # 初期フォーマットを表示
         self.show_current_format()
